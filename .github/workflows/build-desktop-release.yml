@@ -1,0 +1,56 @@
+name: Build Desktop Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: powershell
+        working-directory: client
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build desktop package
+        run: npm run dist:desktop
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: makerworld-helper-windows-${{ github.ref_name }}
+          path: |
+            client/release/*.exe
+            client/release/*.blockmap
+            client/release/*.zip
+          if-no-files-found: error
+
+      - name: Publish GitHub Release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            client/release/*.exe
+            client/release/*.blockmap
+            client/release/*.zip
+          generate_release_notes: true
