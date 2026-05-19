@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "MakerWorld Quick Save",
+  "version": "0.1.0",
+  "description": "Parse MakerWorld model pages and prepare structured data for saving.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://makerworld.com.cn/*",
+    "https://makerworld.com/*",
+    "https://makerworld.bblmw.cn/*",
+    "https://public-cdn.bblmw.cn/*",
+    "https://public-cdn.bambulab.com/*"
+  ],
+  "action": {
+    "default_title": "MakerWorld Quick Save",
+    "default_popup": "popup/popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://makerworld.com.cn/models/*",
+        "https://makerworld.com.cn/*/models/*",
+        "https://makerworld.com/models/*",
+        "https://makerworld.com/*/models/*"
+      ],
+      "js": [
+        "src/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

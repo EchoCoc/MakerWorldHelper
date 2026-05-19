@@ -1,0 +1,73 @@
+{
+  "name": "makerworld-helper-cn-client",
+  "version": "0.1.2",
+  "private": true,
+  "description": "Desktop client for browsing and managing local MakerWorld projects.",
+  "main": "electron/main.js",
+  "scripts": {
+    "version:patch": "node scripts/bump-version.js",
+    "icon:desktop": "powershell -ExecutionPolicy Bypass -File scripts/generate-icon.ps1",
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview",
+    "electron": "electron .",
+    "dev:desktop": "concurrently \"npm run dev\" \"wait-on http-get://127.0.0.1:5173 && electron .\"",
+    "pack:desktop": "npm run icon:desktop && npm run build && electron-builder --dir",
+    "dist:desktop": "npm run icon:desktop && npm run build && electron-builder --win nsis",
+    "dist:desktop:patch": "npm run version:patch && npm run dist:desktop"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.30.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.2.1",
+    "electron": "^37.2.0",
+    "electron-builder": "^25.1.8",
+    "vite": "^5.4.19",
+    "wait-on": "^8.0.5"
+  },
+  "build": {
+    "appId": "com.makerworldhelper.cn.desktop",
+    "productName": "MakerWorld Helper",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraMetadata": {
+      "main": "electron/main.js"
+    },
+    "electronDist": "node_modules/electron/dist",
+    "asar": true,
+    "win": {
+      "icon": "build/icon.ico",
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "installerLanguages": [
+        "zh_CN"
+      ],
+      "warningsAsErrors": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico"
+    }
+  }
+}

@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MakerWorld Helper CN - 本地资源库</title>
+    <link rel="stylesheet" href="library.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">MakerWorld Helper CN</p>
+          <h1>本地资源库</h1>
+          <p class="subtle">浏览本地保存的 MakerWorld 项目，支持搜索、创建仓库、移动项目和仓库管理。</p>
+        </div>
+        <div class="hero-actions">
+          <button id="pickRootButton" class="secondary">选择根目录</button>
+          <button id="createRepoButton" class="primary" disabled>创建仓库</button>
+          <button id="refreshButton" class="secondary" disabled>刷新项目</button>
+        </div>
+      </header>
+
+      <section class="toolbar card">
+        <div class="toolbar-item">
+          <label for="searchInput">搜索项目</label>
+          <input id="searchInput" type="search" placeholder="标题、作者、标签、模型 ID">
+        </div>
+        <div class="toolbar-item toolbar-grow">
+          <label>当前目录</label>
+          <p id="rootSummary" class="path-value">尚未选择</p>
+          <p id="scopeSummary" class="helper-text">支持两种结构：根目录直接放项目，或根目录下按仓库分组。</p>
+        </div>
+        <div class="toolbar-item compact">
+          <label>状态</label>
+          <p id="status" class="status">等待操作</p>
+        </div>
+      </section>
+
+      <section class="layout">
+        <aside class="sidebar card">
+          <div class="section-head">
+            <h2>仓库</h2>
+            <span id="repoCount" class="pill">0</span>
+          </div>
+          <div id="repoList" class="repo-list empty-state">请选择根目录后开始扫描。</div>
+        </aside>
+
+        <section class="content">
+          <section class="card">
+            <div class="section-head">
+              <div>
+                <h2>项目</h2>
+                <p id="projectScope" class="helper-text">当前显示：全部项目</p>
+              </div>
+              <span id="projectCount" class="pill">0</span>
+            </div>
+            <div id="repoManageBar" class="repo-manage-bar hidden">
+              <div>
+                <div id="repoManageTitle" class="manage-title"></div>
+                <div id="repoManageMeta" class="helper-text"></div>
+              </div>
+              <div class="inline-actions">
+                <button id="renameRepoButton" class="secondary" disabled>重命名仓库</button>
+                <button id="deleteRepoButton" class="secondary danger" disabled>删除空仓库</button>
+              </div>
+            </div>
+            <div id="projectGrid" class="project-grid empty-state">还没有可展示的项目。</div>
+          </section>
+
+          <section id="detailCard" class="card hidden">
+            <div class="detail-hero">
+              <div class="detail-cover-wrap">
+                <img id="detailCover" class="detail-cover" alt="模型封面">
+              </div>
+              <div class="detail-side">
+                <div class="detail-meta">
+                  <div class="detail-headline">
+                    <span id="detailRepoBadge" class="repo-badge"></span>
+                    <p id="detailRepo" class="eyebrow"></p>
+                  </div>
+                  <h2 id="detailTitle"></h2>
+                  <p id="detailAuthor" class="subtle"></p>
+                  <div id="detailStats" class="stats"></div>
+                  <div id="detailTags" class="tag-list"></div>
+                  <div class="inline-actions">
+                    <button id="moveProjectButton" class="primary" disabled>移动到仓库</button>
+                    <button id="openSourceButton" class="secondary">打开原网页</button>
+                  </div>
+                </div>
+
+                <div class="detail-instance-panel">
+                  <div class="section-head">
+                    <h3>打印配置</h3>
+                  </div>
+                  <div id="instanceList" class="instance-list"></div>
+                  <div id="instanceToggleWrap" class="instance-toggle-wrap hidden">
+                    <button id="instanceToggleButton" class="ghost">展开更多配置</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="detail-section">
+              <div class="section-head">
+                <h3>项目描述</h3>
+              </div>
+              <div id="detailSummary" class="detail-summary"></div>
+            </div>
+
+            <div class="detail-section">
+              <div class="section-head">
+                <h3>详情图片</h3>
+              </div>
+              <div id="detailPictures" class="picture-grid"></div>
+            </div>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <script src="library.js"></script>
+  </body>
+</html>

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MakerWorld Helper CN</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="app">
+      <header class="hero">
+        <p class="eyebrow">MakerWorld Helper CN</p>
+        <h1>模型解析与保存</h1>
+        <p class="subtle">解析当前 MakerWorld 模型页，并把结构化信息、图片和模型文件保存到本地目录。</p>
+      </header>
+
+      <section class="card">
+        <div class="actions">
+          <button id="openLibraryButton" class="secondary">打开本地资源库</button>
+          <button id="pickDirectoryButton" class="secondary">选择保存目录</button>
+          <button id="extractButton" class="primary">解析当前页面</button>
+          <button id="saveButton" class="primary" disabled>保存当前项目</button>
+        </div>
+        <p id="status" class="status">等待操作</p>
+      </section>
+
+      <section class="card">
+        <h2>摘要</h2>
+        <dl id="summary" class="summary"></dl>
+      </section>
+
+      <section class="card">
+        <h2>目录状态</h2>
+        <dl id="directorySummary" class="summary">
+          <dt>保存目录</dt>
+          <dd>本次会话未选择</dd>
+        </dl>
+      </section>
+
+      <section id="savedResourcesCard" class="card hidden">
+        <h2>已保存资源</h2>
+        <p id="savedResourcesSummary" class="subtle"></p>
+        <pre id="savedResourcesOutput" class="output"></pre>
+      </section>
+
+      <section class="card">
+        <h2>JSON 预览</h2>
+        <pre id="jsonOutput" class="output">尚未解析</pre>
+      </section>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
