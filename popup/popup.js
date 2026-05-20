@@ -240,6 +240,22 @@ function createSavedResourceLines(record, folderName, assets) {
     }
   }
 
+  if ((assets?.documents || []).length > 0 || (assets?.materialFiles || []).length > 0) {
+    lines.push("    documents/");
+  }
+
+  for (const documentItem of assets?.documents || []) {
+    if (documentItem?.fileName) {
+      lines.push(`      ${documentItem.fileName}`);
+    }
+  }
+
+  for (const materialFile of assets?.materialFiles || []) {
+    if (materialFile?.fileName) {
+      lines.push(`      ${materialFile.fileName}`);
+    }
+  }
+
   lines.push("  instances/");
 
   for (const instance of record?.instances || []) {
@@ -312,6 +328,10 @@ async function writeTextFile(parentHandle, name, content) {
   await writable.close();
 }
 
+async function writeJsonFile(parentHandle, name, value) {
+  await writeTextFile(parentHandle, name, JSON.stringify(value, null, 2));
+}
+
 async function fetchBlob(url) {
   const response = await fetch(url, { credentials: "omit" });
 
@@ -354,14 +374,17 @@ async function saveAssets(rootHandle, record) {
   const saved = {
     cover: null,
     pictures: [],
+    documents: [],
     instancePictures: [],
     plates: [],
+    materialFiles: [],
     modelFiles: [],
     modelFilesMissing: []
   };
 
   const modelDir = await ensureDirectory(rootHandle, "model");
   const imagesDir = await ensureDirectory(modelDir, "images");
+  const documentsDir = await ensureDirectory(modelDir, "documents");
 
   if (record?.model?.coverUrl) {
     saved.cover = await downloadToFile(imagesDir, record.model.coverUrl, "cover.jpg");
@@ -375,6 +398,82 @@ async function saveAssets(rootHandle, record) {
       `detail-${String(index + 1).padStart(2, "0")}.jpg`
     );
     saved.pictures.push({ source: picture.url, fileName });
+  }
+
+  for (let index = 0; index < (record?.model?.documents || []).length; index += 1) {
+    const documentItem = record.model.documents[index];
+    if (!documentItem?.url) {
+      continue;
+    }
+
+    const fallbackName =
+      sanitizeName(documentItem.title || `document-${String(index + 1).padStart(2, "0")}.pdf`) ||
+      `document-${String(index + 1).padStart(2, "0")}.pdf`;
+    try {
+      const fileName = await downloadToFile(documentsDir, documentItem.url, fallbackName);
+      saved.documents.push({
+        title: documentItem.title || fileName,
+        source: documentItem.url,
+        fileName
+      });
+    } catch (_error) {
+      // Ignore broken document links so the main project can still be saved.
+    }
+  }
+
+  if (record?.model?.materials?.download?.url) {
+    try {
+      const materialFileName = await downloadToFile(
+        documentsDir,
+        record.model.materials.download.url,
+        sanitizeName(record.model.materials.download.title || "materials-list") || "materials-list"
+      );
+      saved.materialFiles.push({
+        title: record.model.materials.download.title || materialFileName,
+        source: record.model.materials.download.url,
+        fileName: materialFileName
+      });
+    } catch (_error) {
+      // Ignore broken material download links and keep the generated material list files.
+    }
+  }
+
+  const materialGroups = Array.isArray(record?.model?.materials?.groups) ? record.model.materials.groups : [];
+  if (materialGroups.length > 0) {
+    const materialJsonName = "materials-list.json";
+    const materialTextName = "materials-list.txt";
+    const materialLines = [];
+
+    for (const group of materialGroups) {
+      materialLines.push(group?.title || "物料清单");
+      for (const item of group?.items || []) {
+        const parts = [item?.name || ""];
+        if (item?.sku) {
+          parts.push(`SKU: ${item.sku}`);
+        }
+        if (item?.quantity != null) {
+          parts.push(`x ${item.quantity}`);
+        }
+        if (item?.url) {
+          parts.push(item.url);
+        }
+        materialLines.push(`- ${parts.filter(Boolean).join(" | ")}`);
+      }
+      materialLines.push("");
+    }
+
+    await writeJsonFile(documentsDir, materialJsonName, materialGroups);
+    await writeTextFile(documentsDir, materialTextName, materialLines.join("\n").trim());
+    saved.materialFiles.push({
+      title: "物料清单(JSON)",
+      source: "",
+      fileName: materialJsonName
+    });
+    saved.materialFiles.push({
+      title: "物料清单(TXT)",
+      source: "",
+      fileName: materialTextName
+    });
   }
 
   const instancesDir = await ensureDirectory(rootHandle, "instances");
@@ -474,7 +573,11 @@ async function saveRecord() {
     throw new Error("保存目录未授权写入。");
   }
 
-  let sanitizedRecord = sanitizeModelRecord(currentRecord);
+  setStatus("姝ｅ湪鍚屾褰撳墠椤甸潰鍐呭...");
+  let sanitizedRecord = sanitizeModelRecord(await extractModel());
+  currentRecord = sanitizedRecord;
+  renderSummary(sanitizedRecord);
+  jsonOutputNode.textContent = JSON.stringify(sanitizedRecord, null, 2);
 
   if (shouldRefreshRecordDownloads(sanitizedRecord)) {
     setStatus("正在刷新 3MF 下载链接...");

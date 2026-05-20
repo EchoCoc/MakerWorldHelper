@@ -417,6 +417,11 @@ h1 {
   font-weight: 700;
 }
 
+.repoBadge.queue {
+  background: rgba(24, 119, 242, 0.12);
+  color: #185abc;
+}
+
 .panelCount {
   display: inline-flex;
   align-items: center;
@@ -716,6 +721,14 @@ h1 {
   gap: 6px;
 }
 
+.projectHeadingMeta,
+.detailHeadlineMeta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .projectChipRow {
   display: flex;
   flex-wrap: wrap;
@@ -822,6 +835,10 @@ h1 {
 
 .detailPageHeadline {
   margin-bottom: 18px;
+}
+
+.detailHeadlineMeta .subtle {
+  margin-top: 0;
 }
 
 .detailMenu {
@@ -1109,6 +1126,26 @@ h1 {
   font-weight: 700;
 }
 
+.queueStageBadge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.queueStageBadge.printing {
+  background: rgba(24, 119, 242, 0.12);
+  color: #185abc;
+}
+
+.queueStageBadge.assembly {
+  background: rgba(46, 160, 67, 0.14);
+  color: #216e39;
+}
+
 .platePreviewPopover {
   position: absolute;
   top: calc(100% + 10px);
@@ -1232,6 +1269,93 @@ h1 {
 
 .detailSection {
   margin-top: 24px;
+}
+
+.detailCompactSection {
+  margin-top: 18px;
+}
+
+.detailDocumentList,
+.materialSectionList {
+  display: grid;
+  gap: 8px;
+}
+
+.detailDocumentItem,
+.materialSectionCard {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel-strong);
+}
+
+.detailDocumentItem {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.detailDocumentItem:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.detailDocumentItem:not(:disabled):hover {
+  border-color: rgba(182, 81, 0, 0.28);
+  background: rgba(255, 248, 240, 0.95);
+}
+
+.detailDocumentTitle,
+.materialSectionCard h4,
+.materialItemName {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.detailDocumentMeta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.materialSectionCard {
+  padding: 10px 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.materialItemList {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.materialItem {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(114, 93, 70, 0.12);
+  border-radius: 12px;
+  background: rgba(255, 251, 245, 0.88);
+}
+
+.materialItemMain {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.materialItemMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+@media (max-width: 900px) {
+  .materialItemList {
+    grid-template-columns: 1fr;
+  }
 }
 
 .detailSummary {

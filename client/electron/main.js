@@ -19,7 +19,7 @@ const LOCAL_ASSET_CONTENT_TYPES = {
   ".svg": "image/svg+xml",
   ".avif": "image/avif"
 };
-const LIBRARY_CACHE_VERSION = 2;
+const LIBRARY_CACHE_VERSION = 3;
 const THREE_MF_XML_PARSER = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: "",
@@ -165,6 +165,28 @@ function asArray(value) {
   }
 
   return value == null ? [] : [value];
+}
+
+function normalizeTagList(value) {
+  const normalizedTags = [];
+  const seenTags = new Set();
+
+  for (const item of asArray(value)) {
+    const tag = String(item || "").trim();
+    if (!tag) {
+      continue;
+    }
+
+    const normalizedTag = tag.toLocaleLowerCase("zh-CN");
+    if (seenTags.has(normalizedTag)) {
+      continue;
+    }
+
+    seenTags.add(normalizedTag);
+    normalizedTags.push(tag);
+  }
+
+  return normalizedTags;
 }
 
 async function exists(targetPath) {
@@ -438,6 +460,152 @@ async function buildPictureItems(projectPath, manifest) {
   return items.filter(Boolean);
 }
 
+async function buildDocumentItems(projectPath, manifest, metadata) {
+  const documents = asArray(metadata?.model?.documents);
+  const manifestDocuments = asArray(manifest?.assets?.documents);
+  const items = [];
+
+  for (const documentItem of documents) {
+    const manifestItem =
+      manifestDocuments.find((item) => item.source === documentItem?.url || item.title === documentItem?.title) || null;
+    const localPath = manifestItem?.fileName
+      ? path.join(projectPath, "model", "documents", manifestItem.fileName)
+      : "";
+    const localAsset = localPath ? await getAssetDescriptor(localPath) : null;
+
+    items.push({
+      title: documentItem?.title || manifestItem?.title || manifestItem?.fileName || "文档",
+      path: localAsset?.path || "",
+      src: localAsset?.src || "",
+      sourceUrl: documentItem?.url || manifestItem?.source || "",
+      fileName: manifestItem?.fileName || path.basename(localPath || "") || ""
+    });
+  }
+
+  const localDocumentEntries = await readDirectoryEntriesSafe(path.join(projectPath, "model", "documents"));
+  for (const entry of localDocumentEntries) {
+    if (!entry.isFile()) {
+      continue;
+    }
+
+     if (/^materials-list\.(json|txt)$/i.test(entry.name)) {
+      continue;
+    }
+
+    const localPath = path.join(projectPath, "model", "documents", entry.name);
+    const localAsset = await getAssetDescriptor(localPath);
+    items.push({
+      title: entry.name,
+      path: localAsset?.path || "",
+      src: localAsset?.src || "",
+      sourceUrl: "",
+      fileName: entry.name
+    });
+  }
+
+  return dedupeDocumentItems(items);
+}
+
+function scoreDocumentDisplayTitle(title, fileName) {
+  const normalizedTitle = String(title || "").trim();
+  const normalizedFileName = String(fileName || "").trim();
+  let score = 0;
+
+  if (normalizedTitle && normalizedTitle !== normalizedFileName) {
+    score += 3;
+  }
+
+  if (/assembly|instructions?|guide|manual|说明|指南/i.test(normalizedTitle)) {
+    score += 3;
+  }
+
+  if (/\.pdf$/i.test(normalizedTitle)) {
+    score += 1;
+  }
+
+  return score;
+}
+
+function dedupeDocumentItems(items) {
+  const nextItems = [];
+  const seen = new Map();
+
+  for (const item of items.filter(Boolean)) {
+    const key = item.path || item.sourceUrl || item.fileName || item.title || "";
+    if (!key) {
+      continue;
+    }
+
+    const existingIndex = seen.get(key);
+    if (existingIndex == null) {
+      seen.set(key, nextItems.length);
+      nextItems.push(item);
+      continue;
+    }
+
+    const existingItem = nextItems[existingIndex];
+    const existingScore = scoreDocumentDisplayTitle(existingItem.title, existingItem.fileName);
+    const nextScore = scoreDocumentDisplayTitle(item.title, item.fileName);
+    if (nextScore > existingScore) {
+      nextItems[existingIndex] = item;
+    }
+  }
+
+  return nextItems;
+}
+
+async function buildMaterialSections(projectPath, metadata, manifest) {
+  let groups = asArray(metadata?.model?.materials?.groups)
+    .map((group) => ({
+      title: String(group?.title || "物料清单").trim() || "物料清单",
+      items: asArray(group?.items)
+        .map((item) => ({
+          name: String(item?.name || "").trim(),
+          sku: String(item?.sku || "").trim(),
+          quantity:
+            typeof item?.quantity === "number"
+              ? item.quantity
+              : Number.parseInt(String(item?.quantity || "").replace(/[^\d]/g, ""), 10) || null,
+          url: String(item?.url || "").trim()
+        }))
+        .filter((item) => item.name)
+    }))
+    .filter((group) => group.items.length > 0);
+
+  if (groups.length === 0) {
+    const manifestMaterialFiles = asArray(manifest?.assets?.materialFiles);
+    const materialJsonFile =
+      manifestMaterialFiles.find((item) => item.fileName === "materials-list.json")?.fileName || "materials-list.json";
+    const materialJsonPath = path.join(projectPath, "model", "documents", materialJsonFile);
+
+    if (await exists(materialJsonPath)) {
+      try {
+        const payload = await readJsonFile(materialJsonPath);
+        groups = asArray(payload?.groups)
+          .map((group) => ({
+            title: String(group?.title || "鐗╂枡娓呭崟").trim() || "鐗╂枡娓呭崟",
+            items: asArray(group?.items)
+              .map((item) => ({
+                name: String(item?.name || "").trim(),
+                sku: String(item?.sku || "").trim(),
+                quantity:
+                  typeof item?.quantity === "number"
+                    ? item.quantity
+                    : Number.parseInt(String(item?.quantity || "").replace(/[^\d]/g, ""), 10) || null,
+                url: String(item?.url || "").trim()
+              }))
+              .filter((item) => item.name)
+          }))
+          .filter((group) => group.items.length > 0);
+      } catch {
+        groups = [];
+      }
+    }
+  }
+
+  return groups;
+}
+
 function getInstanceDirectoryName(instance) {
   const raw = `${instance?.id || "instance"}-${instance?.title || "profile"}`;
   const sanitized = sanitizeFolderName(raw);
@@ -533,7 +701,8 @@ async function getProjectFingerprint(projectPath) {
     getPathStatSignature(path.join(projectPath, "metadata.json")),
     getPathStatSignature(path.join(projectPath, "save-manifest.json")),
     getPathStatSignature(path.join(projectPath, "instances")),
-    getPathStatSignature(path.join(projectPath, "model", "images"))
+    getPathStatSignature(path.join(projectPath, "model", "images")),
+    getPathStatSignature(path.join(projectPath, "model", "documents"))
   ]);
 
   return fingerprintParts.join("|");
@@ -562,7 +731,9 @@ async function readProject(projectPath, repo, cachedProject = null) {
   const manifest = (await exists(manifestPath)) ? await readJsonFile(manifestPath) : null;
   const cover = await buildProjectCover(projectPath, manifest, metadata);
   const pictureItems = await buildPictureItems(projectPath, manifest);
+  const documentItems = await buildDocumentItems(projectPath, manifest, metadata);
   const instanceItems = await buildInstanceItems(projectPath, metadata, manifest);
+  const materialSections = await buildMaterialSections(projectPath, metadata, manifest);
 
   return {
     id: `${repo.id}/${path.basename(projectPath)}`,
@@ -576,7 +747,7 @@ async function readProject(projectPath, repo, cachedProject = null) {
     capturedAt: metadata?.capturedAt || "",
     createdAt: metadata?.model?.createdAt || "",
     updatedAt: metadata?.model?.updatedAt || "",
-    tags: asArray(metadata?.model?.tags),
+    tags: normalizeTagList(metadata?.model?.tags),
     summaryHtml: metadata?.model?.summaryHtml || "",
     summaryText: metadata?.model?.summaryText || "",
     sourceUrl: metadata?.sourceUrl || "",
@@ -584,7 +755,9 @@ async function readProject(projectPath, repo, cachedProject = null) {
     coverSrc: cover.coverSrc,
     coverUrl: cover.coverUrl,
     pictureItems,
+    documentItems,
     instanceItems,
+    materialSections,
     cacheFingerprint: fingerprint,
     manifest,
     metadata
@@ -829,6 +1002,21 @@ function sortPlateEntryNames(entryNames) {
   });
 }
 
+function sortIndexedImageEntryNames(entryNames) {
+  return [...entryNames].sort((left, right) => {
+    const leftMatch = left.match(/(\d+)(?=\.[a-z]+$)/i);
+    const rightMatch = right.match(/(\d+)(?=\.[a-z]+$)/i);
+    const leftIndex = leftMatch ? Number.parseInt(leftMatch[1], 10) : 0;
+    const rightIndex = rightMatch ? Number.parseInt(rightMatch[1], 10) : 0;
+
+    if (leftIndex !== rightIndex) {
+      return leftIndex - rightIndex;
+    }
+
+    return left.localeCompare(right, "zh-CN", { numeric: true, sensitivity: "base" });
+  });
+}
+
 function parse3mfModelMetadata(zip) {
   const xml = readZipEntryText(zip, "3D/3dmodel.model");
   if (!xml) {
@@ -951,14 +1139,28 @@ async function importSingle3mfProject(rootPath, targetDirectory, filePath) {
   const usedModelImageNames = new Set();
   const manifestPictures = [];
   const modelPictureEntries = getZipEntries(zip, (entryName) => entryName.startsWith("Auxiliaries/Model Pictures/"));
+  const metadataPreviewEntries = sortIndexedImageEntryNames(
+    getZipEntries(zip, (entryName) => /^Metadata\/(top|pick)_\d+\.(png|jpg|jpeg|webp)$/i.test(entryName))
+  );
   const coverEntryName =
     [
       "Auxiliaries/.thumbnails/thumbnail_middle.png",
       "Auxiliaries/.thumbnails/thumbnail_3mf.png",
       "Auxiliaries/.thumbnails/thumbnail_small.png"
-    ].find((entryName) => zip.getEntry(entryName)) || modelPictureEntries[0] || "";
+    ].find((entryName) => zip.getEntry(entryName)) ||
+    modelPictureEntries[0] ||
+    metadataPreviewEntries[0] ||
+    "";
   const plateEntryNames = sortPlateEntryNames(
     getZipEntries(zip, (entryName) => /^Metadata\/plate_\d+\.(png|jpg|jpeg|webp)$/i.test(entryName))
+  );
+  const extraPlatePreviewEntryNames = sortIndexedImageEntryNames(
+    getZipEntries(
+      zip,
+      (entryName) =>
+        /^Metadata\/plate_\d+_small\.(png|jpg|jpeg|webp)$/i.test(entryName) ||
+        /^Metadata\/plate_no_light_\d+\.(png|jpg|jpeg|webp)$/i.test(entryName)
+    )
   );
 
   await fs.mkdir(modelImagesDirectory, { recursive: true });
@@ -985,6 +1187,16 @@ async function importSingle3mfProject(rootPath, targetDirectory, filePath) {
     });
   }
 
+  for (const entryName of metadataPreviewEntries) {
+    const sourceFileName = path.basename(entryName);
+    const targetFileName = allocateUniqueFileName(sourceFileName, usedModelImageNames);
+    await copyZipEntryToFile(zip, entryName, path.join(modelImagesDirectory, targetFileName));
+    manifestPictures.push({
+      source: buildImportedPictureSource(filePath, entryName),
+      fileName: targetFileName
+    });
+  }
+
   if (!coverFileName && manifestPictures[0]?.fileName) {
     coverFileName = manifestPictures[0].fileName;
   }
@@ -998,6 +1210,17 @@ async function importSingle3mfProject(rootPath, targetDirectory, filePath) {
       instanceId,
       plateIndex: plateMatch ? Number.parseInt(plateMatch[1], 10) : manifestPlates.length + 1,
       fileName: plateFileName
+    });
+  }
+
+  const manifestPlatePreviews = [];
+  for (const entryName of extraPlatePreviewEntryNames) {
+    const previewFileName = path.basename(entryName);
+    await copyZipEntryToFile(zip, entryName, path.join(platesDirectory, previewFileName));
+    manifestPlatePreviews.push({
+      instanceId,
+      fileName: previewFileName,
+      source: buildImportedPictureSource(filePath, entryName)
     });
   }
 
@@ -1085,6 +1308,7 @@ async function importSingle3mfProject(rootPath, targetDirectory, filePath) {
       pictures: manifestPictures,
       instancePictures: [],
       plates: manifestPlates,
+      platePreviews: manifestPlatePreviews,
       modelFiles: [
         {
           instanceId,
@@ -1310,6 +1534,45 @@ ipcMain.handle("library:refresh-project", async (_event, rootPath, projectPath) 
     if (!(await exists(projectPath))) {
       return { ok: true, project: null };
     }
+
+    return {
+      ok: true,
+      project: await readProject(projectPath, repo)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+});
+
+ipcMain.handle("library:update-project-tags", async (_event, rootPath, projectPath, tags) => {
+  if (!rootPath || !projectPath) {
+    return { ok: false, error: "缺少标签更新参数。" };
+  }
+
+  try {
+    if (!isPathInside(rootPath, projectPath)) {
+      return { ok: false, error: "项目不在当前根目录中。" };
+    }
+
+    const repo = resolveProjectRepo(rootPath, projectPath);
+    if (!repo) {
+      return { ok: false, error: "无法确定项目所在仓库。" };
+    }
+
+    const metadataPath = path.join(projectPath, "metadata.json");
+    if (!(await exists(metadataPath))) {
+      return { ok: false, error: "项目缺少 metadata.json。" };
+    }
+
+    const metadata = await readJsonFile(metadataPath);
+    metadata.model = metadata.model && typeof metadata.model === "object" ? metadata.model : {};
+    metadata.model.tags = normalizeTagList(tags);
+    metadata.model.updatedAt = new Date().toISOString();
+
+    await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2), "utf8");
 
     return {
       ok: true,

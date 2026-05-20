@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld("desktopAPI", {
   deleteRepo: (rootPath, repoName) => ipcRenderer.invoke("library:delete-repo", rootPath, repoName),
   deleteProject: (rootPath, projectPath) =>
     ipcRenderer.invoke("library:delete-project", rootPath, projectPath),
+  updateProjectTags: (rootPath, projectPath, tags) =>
+    ipcRenderer.invoke("library:update-project-tags", rootPath, projectPath, tags),
   moveProject: (projectPath, targetRepoPath) =>
     ipcRenderer.invoke("library:move-project", projectPath, targetRepoPath)
 });

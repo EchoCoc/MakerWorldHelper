@@ -64,6 +64,530 @@
     return template.content.textContent?.trim() || "";
   }
 
+  function normalizeText(value) {
+    return String(value || "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function toAbsoluteUrl(value) {
+    const text = String(value || "").trim();
+    if (!text) {
+      return "";
+    }
+
+    try {
+      return new URL(text, location.href).href;
+    } catch {
+      return "";
+    }
+  }
+
+  function isResolvableAssetReference(value) {
+    const text = String(value || "").trim();
+    if (!text) {
+      return false;
+    }
+
+    if (/^(https?:)?\/\//i.test(text)) {
+      return true;
+    }
+
+    if (/^[./]/.test(text)) {
+      return true;
+    }
+
+    return text.includes("/") || text.includes("?");
+  }
+
+  function sanitizeFileLikeTitle(value, fallback = "") {
+    const text = normalizeText(value || fallback);
+    return text.replace(/[<>:"/\\|?*\u0000-\u001F]+/g, "-");
+  }
+
+  function isDocumentKeyword(value) {
+    return /document|attachment|manual|guide|assembly|instructions?|pdf|file|download|文档|附件|文件|说明|指南/i.test(
+      String(value || "")
+    );
+  }
+
+  function isDocumentLikeAsset(url, title = "", path = "") {
+    const normalizedUrl = String(url || "").trim();
+    const normalizedTitle = String(title || "").trim();
+    const normalizedPath = String(path || "").trim();
+    const context = `${normalizedTitle} ${normalizedPath}`;
+
+    if (/\.stl\.(png|jpe?g|webp)(?:[?#]|$)/i.test(normalizedUrl)) {
+      return false;
+    }
+
+    if (/makerworld\.com(?:\.cn)?\/[a-z]{2}\/models\//i.test(normalizedUrl)) {
+      return false;
+    }
+
+    if (/\.pdf(?:[?#]|$)/i.test(normalizedUrl) || /\.pdf$/i.test(normalizedTitle)) {
+      return true;
+    }
+
+    if (!/\.(png|jpe?g|webp)(?:[?#]|$)/i.test(normalizedUrl) && !/\.(png|jpe?g|webp)$/i.test(normalizedTitle)) {
+      return false;
+    }
+
+    if (/\/msfile\//i.test(normalizedUrl)) {
+      return false;
+    }
+
+    return isDocumentKeyword(context) && /\/design\//i.test(normalizedUrl);
+  }
+
+  function isUsableDocumentUrl(rawValue, absoluteUrl, title = "", path = "") {
+    if (!absoluteUrl || !isDocumentLikeAsset(absoluteUrl, title, path)) {
+      return false;
+    }
+
+    return isResolvableAssetReference(rawValue);
+  }
+
+  const DOCUMENT_URL_ATTRIBUTE_NAMES = ["href", "src", "data-href", "data-url", "data-download-url"];
+
+  function dedupeBy(items, buildKey) {
+    const nextItems = [];
+    const seen = new Set();
+
+    for (const item of items) {
+      const key = buildKey(item);
+      if (!key || seen.has(key)) {
+        continue;
+      }
+
+      seen.add(key);
+      nextItems.push(item);
+    }
+
+    return nextItems;
+  }
+
+  function scoreDocumentTitle(title, url) {
+    const text = String(title || "").trim();
+    const fileName = String(url || "").split("/").pop() || "";
+    let score = 0;
+
+    if (text && text !== fileName) {
+      score += 3;
+    }
+
+    if (/assembly|instructions?|guide|manual|说明|指南/i.test(text)) {
+      score += 3;
+    }
+
+    if (/\.pdf$/i.test(text)) {
+      score += 1;
+    }
+
+    return score;
+  }
+
+  function normalizeDocumentEntries(items) {
+    const byUrl = new Map();
+
+    for (const item of items.filter(Boolean)) {
+      const url = String(item.url || "").trim();
+      const title = sanitizeFileLikeTitle(item.title || "", url.split("/").pop() || "document");
+      const source = String(item.source || "").trim();
+
+      if (!url || !isDocumentLikeAsset(url, title, item.source || "")) {
+        continue;
+      }
+
+      if (source === "dom-fallback" && !/^https:\/\/makerworld\.bblmw\.cn\/makerworld\/model\/.+\/design\/.+\.pdf(?:[?#].*)?$/i.test(url)) {
+        continue;
+      }
+
+      const normalizedItem = {
+        title,
+        url,
+        source: source || "unknown"
+      };
+
+      const existing = byUrl.get(url);
+      if (!existing) {
+        byUrl.set(url, normalizedItem);
+        continue;
+      }
+
+      const existingScore = scoreDocumentTitle(existing.title, existing.url);
+      const nextScore = scoreDocumentTitle(normalizedItem.title, normalizedItem.url);
+      if (nextScore > existingScore) {
+        byUrl.set(url, normalizedItem);
+      }
+    }
+
+    return Array.from(byUrl.values());
+  }
+
+  function delay(ms) {
+    return new Promise((resolve) => {
+      window.setTimeout(resolve, ms);
+    });
+  }
+
+  function collectDocumentCandidates(value, bucket, path = "root", visited = new WeakSet()) {
+    if (value == null) {
+      return;
+    }
+
+    if (typeof value === "string") {
+      const url = toAbsoluteUrl(value);
+      if (url && isUsableDocumentUrl(value, url, "", path) && isDocumentKeyword(path)) {
+        bucket.push({
+          title: sanitizeFileLikeTitle(url.split("/").pop() || "document", "document"),
+          url,
+          source: "data"
+        });
+      }
+      return;
+    }
+
+    if (typeof value !== "object") {
+      return;
+    }
+
+    if (visited.has(value)) {
+      return;
+    }
+    visited.add(value);
+
+    if (Array.isArray(value)) {
+      value.forEach((item, index) => collectDocumentCandidates(item, bucket, `${path}[${index}]`, visited));
+      return;
+    }
+
+    const objectPath = String(path || "");
+    const rawCandidateUrl =
+      value.url ||
+      value.href ||
+      value.link ||
+      value.downloadUrl ||
+      value.fileUrl ||
+      value.file_url ||
+      value.src ||
+      value.path ||
+      "";
+    const candidateUrl = toAbsoluteUrl(
+      rawCandidateUrl
+    );
+    const candidateTitle = sanitizeFileLikeTitle(
+      value.title || value.name || value.fileName || value.filename || value.label || value.displayName || "",
+      "document"
+    );
+
+    if (
+      candidateUrl &&
+      isUsableDocumentUrl(rawCandidateUrl, candidateUrl, candidateTitle, objectPath) &&
+      isDocumentKeyword(objectPath)
+    ) {
+      bucket.push({
+        title: candidateTitle || sanitizeFileLikeTitle(candidateUrl.split("/").pop() || "document", "document"),
+        url: candidateUrl,
+        source: "data"
+      });
+    }
+
+    for (const [key, item] of Object.entries(value)) {
+      collectDocumentCandidates(item, bucket, `${objectPath}.${key}`, visited);
+    }
+  }
+
+  function extractDocumentsFromDom() {
+    const documentHeading = Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6")).find((element) =>
+      /文档|文件|附件|Document/i.test(normalizeText(element.textContent))
+    );
+    if (!documentHeading) {
+      return [];
+    }
+
+    const sectionRoot = documentHeading.parentElement;
+    if (!sectionRoot) {
+      return [];
+    }
+
+    const fileTitleElements = Array.from(sectionRoot.querySelectorAll("*")).filter((element) =>
+      /\.(pdf|png|jpe?g|webp)\b/i.test(normalizeText(element.textContent))
+    );
+
+    const documents = fileTitleElements.map((titleElement) => {
+      const title = sanitizeFileLikeTitle(titleElement.textContent, "document");
+      let container = titleElement;
+      let url = "";
+
+      while (container && container !== sectionRoot && !url) {
+        const linkElement = container.querySelector?.("a[href]");
+        if (linkElement?.href) {
+          url = toAbsoluteUrl(linkElement.href);
+          break;
+        }
+
+        const downloadTarget =
+          container.getAttribute?.("href") ||
+          container.getAttribute?.("data-href") ||
+          container.getAttribute?.("data-url") ||
+          container.getAttribute?.("data-download-url");
+        if (downloadTarget) {
+          url = toAbsoluteUrl(downloadTarget);
+          break;
+        }
+
+        container = container.parentElement;
+      }
+
+      return {
+        title,
+        url,
+        source: "dom"
+      };
+    });
+
+    return dedupeBy(
+      documents.filter((item) => item.title && item.url),
+      (item) => `${item.title}::${item.url}`
+    );
+  }
+
+  function extractDocumentsWithFallback() {
+    const domDocuments = extractDocumentsFromDom();
+    if (domDocuments.length > 0) {
+      return domDocuments;
+    }
+
+    const fileTitleElements = Array.from(document.querySelectorAll("*")).filter((element) =>
+      /\.(pdf|png|jpe?g|webp)\b/i.test(normalizeText(element.textContent))
+    );
+
+    const documents = fileTitleElements.map((titleElement) => {
+      const title = sanitizeFileLikeTitle(titleElement.textContent, "document");
+      let container = titleElement;
+      let url = "";
+      let hopCount = 0;
+
+      while (container && container !== document.body && !url && hopCount < 10) {
+        for (const attributeName of DOCUMENT_URL_ATTRIBUTE_NAMES) {
+          const rawValue = container.getAttribute?.(attributeName);
+          const candidateUrl = toAbsoluteUrl(rawValue);
+          if (candidateUrl && isUsableDocumentUrl(rawValue, candidateUrl, title, attributeName)) {
+            url = candidateUrl;
+            break;
+          }
+        }
+
+        if (url) {
+          break;
+        }
+
+        const linkCandidates = [
+          container.closest?.("a[href]"),
+          container.querySelector?.("a[href]"),
+          container.querySelector?.("[data-url]"),
+          container.querySelector?.("[data-download-url]"),
+          container.querySelector?.("[data-href]")
+        ].filter(Boolean);
+
+        for (const linkCandidate of linkCandidates) {
+          const downloadTarget = DOCUMENT_URL_ATTRIBUTE_NAMES
+            .map((attributeName) => linkCandidate.getAttribute?.(attributeName))
+            .find(Boolean);
+          const candidateUrl = toAbsoluteUrl(downloadTarget);
+          if (candidateUrl && isUsableDocumentUrl(downloadTarget, candidateUrl, title, linkCandidate.outerHTML || "")) {
+            url = candidateUrl;
+            break;
+          }
+        }
+
+        if (url) {
+          break;
+        }
+
+        const nearbyButtons = Array.from(container.parentElement?.querySelectorAll?.("a[href],button,[role='button']") || []);
+        for (const buttonElement of nearbyButtons) {
+          const aria = normalizeText(buttonElement.getAttribute?.("aria-label") || "");
+          const buttonText = normalizeText(buttonElement.textContent || "");
+          if (!/download|open|preview|预览|下载|打开/i.test(`${aria} ${buttonText}`)) {
+            continue;
+          }
+
+          for (const attributeName of DOCUMENT_URL_ATTRIBUTE_NAMES) {
+            const rawValue = buttonElement.getAttribute?.(attributeName);
+            const candidateUrl = toAbsoluteUrl(rawValue);
+            if (candidateUrl && isUsableDocumentUrl(rawValue, candidateUrl, title, attributeName)) {
+              url = candidateUrl;
+              break;
+            }
+          }
+
+          if (url) {
+            break;
+          }
+        }
+
+        container = container.parentElement;
+        hopCount += 1;
+      }
+
+      return {
+        title,
+        url,
+        source: "dom-fallback"
+      };
+    });
+
+    return dedupeBy(
+      documents.filter((item) => item.title && item.url),
+      (item) => `${item.title}::${item.url}`
+    );
+  }
+
+  function toMaterialItem(value) {
+    if (!value || typeof value !== "object") {
+      return null;
+    }
+
+    const name = normalizeText(
+      value.name || value.title || value.productName || value.displayName || value.materialName || ""
+    );
+    const sku = normalizeText(value.sku || value.code || value.itemCode || value.productCode || "");
+    const quantityRaw = value.quantity ?? value.qty ?? value.count ?? value.num ?? null;
+    const quantity =
+      typeof quantityRaw === "number"
+        ? quantityRaw
+        : Number.parseInt(String(quantityRaw || "").replace(/[^\d]/g, ""), 10) || null;
+    const url = toAbsoluteUrl(value.url || value.link || value.href || value.productUrl || value.jumpUrl || "");
+
+    if (!name) {
+      return null;
+    }
+
+    if (!sku && quantity == null && !url) {
+      return null;
+    }
+
+    return {
+      name,
+      sku,
+      quantity,
+      url
+    };
+  }
+
+  function collectMaterialGroups(value, bucket, path = "root", visited = new WeakSet()) {
+    if (!value || typeof value !== "object") {
+      return;
+    }
+
+    if (visited.has(value)) {
+      return;
+    }
+    visited.add(value);
+
+    if (Array.isArray(value)) {
+      const materialItems = value.map((item) => toMaterialItem(item)).filter(Boolean);
+      if (materialItems.length >= 1 && /material|bom|bill|consum|shop|part/i.test(path.toLowerCase())) {
+        bucket.push({
+          title: path.split(".").pop()?.replace(/\[\d+\]/g, "") || "物料",
+          items: dedupeBy(materialItems, (item) => `${item.name}::${item.sku}::${item.url}`)
+        });
+      }
+
+      value.forEach((item, index) => collectMaterialGroups(item, bucket, `${path}[${index}]`, visited));
+      return;
+    }
+
+    for (const [key, item] of Object.entries(value)) {
+      collectMaterialGroups(item, bucket, `${path}.${key}`, visited);
+    }
+  }
+
+  function extractMaterialsFromDom() {
+    const materialsHeading = Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6")).find((element) =>
+      /物料清单|BOM|Material/i.test(normalizeText(element.textContent))
+    );
+    if (!materialsHeading) {
+      return { groups: [], download: null };
+    }
+
+    const sectionRoot = materialsHeading.parentElement;
+    if (!sectionRoot) {
+      return { groups: [], download: null };
+    }
+
+    const materialLinks = Array.from(sectionRoot.querySelectorAll("a[href]")).filter((anchor) =>
+      /store\.bambulab\.com/i.test(anchor.href)
+    );
+    const items = dedupeBy(
+      materialLinks
+        .map((anchor) => {
+          const anchorText = normalizeText(anchor.textContent);
+          const containerText = normalizeText(anchor.parentElement?.parentElement?.textContent || anchor.textContent);
+          const skuMatch =
+            containerText.match(/\b[A-Z0-9]{2,}(?:-[A-Z0-9]{1,}){2,}\b/) ||
+            containerText.match(/\b[A-Z]\d{2}-[A-Z0-9.-]+\b/);
+          const quantityMatch = containerText.match(/[×xX*]\s*(\d+)/) || containerText.match(/\b(\d+)\s*$/);
+
+          return {
+            name: anchorText,
+            sku: skuMatch?.[0] || "",
+            quantity: quantityMatch ? Number.parseInt(quantityMatch[1], 10) : null,
+            url: anchor.href
+          };
+        })
+        .filter((item) => item.name),
+      (item) => `${item.name}::${item.sku}::${item.url}`
+    );
+
+    const downloadControl = Array.from(sectionRoot.querySelectorAll("a[href],button")).find((element) =>
+      /下载物料清单|下載物料清單|download/i.test(normalizeText(element.textContent || element.getAttribute("aria-label")))
+    );
+
+    return {
+      groups: items.length
+        ? [
+            {
+              title: "物料清单",
+              items
+            }
+          ]
+        : [],
+      download:
+        downloadControl && downloadControl.tagName.toLowerCase() === "a"
+          ? {
+              title: "物料清单",
+              url: toAbsoluteUrl(downloadControl.href)
+            }
+          : null
+    };
+  }
+
+  async function collectSupplementalContentWithRetry() {
+    let documents = extractDocumentsFromDom();
+    let materials = extractMaterialsFromDom();
+
+    if (documents.length > 0 || materials.groups.length > 0 || materials.download) {
+      return { documents, materials };
+    }
+
+    const deadline = Date.now() + 3000;
+
+    while (Date.now() < deadline) {
+      await delay(180);
+      documents = extractDocumentsFromDom();
+      materials = extractMaterialsFromDom();
+
+      if (documents.length > 0 || materials.groups.length > 0 || materials.download) {
+        break;
+      }
+    }
+
+    return { documents, materials };
+  }
+
   function slugifySegment(value) {
     return String(value || "")
       .trim()
@@ -207,12 +731,6 @@
     return response.json();
   }
 
-  function delay(ms) {
-    return new Promise((resolve) => {
-      window.setTimeout(resolve, ms);
-    });
-  }
-
   function isRetryableDownloadError(message) {
     return /HTTP 418|HTTP 429|HTTP 5\d\d|not a robot|Failed to fetch|NetworkError/i.test(message || "");
   }
@@ -315,6 +833,24 @@
     const design = pageProps.design || {};
     const extension = design.designExtension || {};
     const creator = design.designCreator || {};
+    const documentCandidatesFromData = [];
+    collectDocumentCandidates(pageProps, documentCandidatesFromData);
+    const supplementalContent = await collectSupplementalContentWithRetry();
+    const documents = normalizeDocumentEntries([
+      ...documentCandidatesFromData,
+      ...supplementalContent.documents,
+      ...extractDocumentsWithFallback()
+    ]);
+    const materialGroupsFromData = [];
+    collectMaterialGroups(pageProps, materialGroupsFromData);
+    const domMaterials = supplementalContent.materials;
+    const materials = {
+      groups:
+        materialGroupsFromData.length > 0
+          ? materialGroupsFromData
+          : domMaterials.groups,
+      download: domMaterials.download
+    };
 
     const title = design.title || document.title || "makerworld-model";
     const slugBase = slugifySegment(`${design.id || "model"}-${title}`);
@@ -354,7 +890,9 @@
         rawModelFileDownloadCount: design.rawModelFileDownloadCount ?? 0,
         categories: Array.isArray(design.categories) ? design.categories : [],
         tags: Array.isArray(design.tags) ? design.tags : [],
-        pictures: Array.isArray(extension.design_pictures) ? extension.design_pictures : []
+        pictures: Array.isArray(extension.design_pictures) ? extension.design_pictures : [],
+        documents,
+        materials
       },
       creator: {
         uid: creator.uid ?? null,

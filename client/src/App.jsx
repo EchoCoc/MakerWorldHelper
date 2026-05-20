@@ -3,8 +3,14 @@ import { Route, Routes } from "react-router-dom";
 import { LibraryPage } from "./pages/LibraryPage";
 
 const ROOT_PATH_STORAGE_KEY = "mw-helper.desktop.root-path";
+const PRINT_QUEUE_STORAGE_KEY = "mw-helper.desktop.print-queue";
 const PROJECTS_PER_PAGE = 24;
 const DEFAULT_SORT_KEY = "updated-desc";
+const QUEUE_REPO_ID = "queue";
+const QUEUE_STAGE_OPTIONS = [
+  { id: "printing", label: "打印中" },
+  { id: "assembly", label: "拼装中" }
+];
 
 function normalizeSortText(value) {
   return String(value || "").trim().toLocaleLowerCase("zh-CN");
@@ -60,6 +66,84 @@ function writeCachedRootPath(rootPath) {
   }
 }
 
+function readCachedQueueEntries() {
+  try {
+    const rawValue = window.localStorage.getItem(PRINT_QUEUE_STORAGE_KEY);
+    if (!rawValue) {
+      return {};
+    }
+
+    const parsedValue = JSON.parse(rawValue);
+    return parsedValue && typeof parsedValue === "object" && !Array.isArray(parsedValue) ? parsedValue : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeCachedQueueEntries(queueEntries) {
+  try {
+    const hasEntries = Object.keys(queueEntries || {}).length > 0;
+    if (hasEntries) {
+      window.localStorage.setItem(PRINT_QUEUE_STORAGE_KEY, JSON.stringify(queueEntries));
+    } else {
+      window.localStorage.removeItem(PRINT_QUEUE_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage failures and continue without persistence.
+  }
+}
+
+function getProjectQueueKey(project) {
+  if (project?.modelId) {
+    return `model:${project.modelId}`;
+  }
+
+  return `path:${project?.projectPath || project?.id || ""}`;
+}
+
+function normalizeQueueStage(stage) {
+  return stage === "assembly" ? "assembly" : "printing";
+}
+
+function normalizeQueueEntry(entry) {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+
+  return {
+    stage: normalizeQueueStage(entry.stage),
+    markedAt:
+      typeof entry.markedAt === "string" && entry.markedAt.trim() ? entry.markedAt : new Date().toISOString()
+  };
+}
+
+function getQueueStageLabel(stage) {
+  return normalizeQueueStage(stage) === "assembly" ? "拼装中" : "打印中";
+}
+
+function parseTagInput(value) {
+  const normalizedText = String(value || "").replace(/，/g, ",");
+  const nextTags = [];
+  const seenTags = new Set();
+
+  for (const item of normalizedText.split(",")) {
+    const tag = item.trim();
+    if (!tag) {
+      continue;
+    }
+
+    const normalizedTag = tag.toLocaleLowerCase("zh-CN");
+    if (seenTags.has(normalizedTag)) {
+      continue;
+    }
+
+    seenTags.add(normalizedTag);
+    nextTags.push(tag);
+  }
+
+  return nextTags;
+}
+
 function syncRepositoryCounts(repositories, projects) {
   const projectCounts = new Map();
 
@@ -103,13 +187,15 @@ function applyLibrarySnapshot({
   projects,
   nextRepoId = "all",
   nextProjectId = null,
+  virtualRepoIds = [],
   setRepositories,
   setAllProjects,
   setSelectedRepoId,
   setSelectedProjectId,
   setCurrentPage
 }) {
-  const repoExists = repositories.some((repo) => repo.id === nextRepoId);
+  const repoExists =
+    repositories.some((repo) => repo.id === nextRepoId) || virtualRepoIds.includes(nextRepoId);
   const projectExists = nextProjectId ? projects.some((project) => project.id === nextProjectId) : false;
 
   setRepositories(repositories);
@@ -153,6 +239,8 @@ function ModalShell({ title, children, actions, onClose }) {
 
 function TextInputDialog({ dialog, onCancel, onConfirm }) {
   const [value, setValue] = useState(dialog.initialValue || "");
+  const allowEmpty = Boolean(dialog.allowEmpty);
+  const canConfirm = allowEmpty || Boolean(value.trim());
 
   return (
     <ModalShell
@@ -167,7 +255,7 @@ function TextInputDialog({ dialog, onCancel, onConfirm }) {
             className="primaryButton"
             type="button"
             onClick={() => onConfirm(value)}
-            disabled={!value.trim()}
+            disabled={!canConfirm}
           >
             {dialog.confirmLabel || "确定"}
           </button>
@@ -182,7 +270,7 @@ function TextInputDialog({ dialog, onCancel, onConfirm }) {
         placeholder={dialog.placeholder || ""}
         onChange={(event) => setValue(event.target.value)}
         onKeyDown={(event) => {
-          if (event.key === "Enter" && value.trim()) {
+          if (event.key === "Enter" && canConfirm) {
             onConfirm(value);
           }
         }}
@@ -213,7 +301,7 @@ function ConfirmDialog({ dialog, onCancel, onConfirm }) {
 }
 
 function ChoiceDialog({ dialog, onCancel, onConfirm }) {
-  const [selectedId, setSelectedId] = useState(dialog.options[0]?.id || "");
+  const [selectedId, setSelectedId] = useState(dialog.initialSelectedId || dialog.options[0]?.id || "");
 
   return (
     <ModalShell
@@ -265,6 +353,7 @@ export default function App() {
   const [searchText, setSearchText] = useState("");
   const [sortKey, setSortKey] = useState(DEFAULT_SORT_KEY);
   const [currentPage, setCurrentPage] = useState(1);
+  const [queueEntries, setQueueEntries] = useState(() => readCachedQueueEntries());
   const [status, setStatus] = useState(() =>
     hasDesktopApi ? "等待选择根目录。" : "当前为浏览器模式，请使用桌面端打开本地资源库。"
   );
@@ -273,12 +362,67 @@ export default function App() {
   const [choiceDialog, setChoiceDialog] = useState(null);
   const deferredSearchText = useDeferredValue(searchText);
 
+  function updateQueueEntries(updater) {
+    setQueueEntries((currentEntries) => {
+      const resolvedEntries =
+        typeof updater === "function" ? updater(currentEntries) : updater || {};
+      writeCachedQueueEntries(resolvedEntries);
+      return resolvedEntries;
+    });
+  }
+
+  const decoratedProjects = useMemo(
+    () =>
+      allProjects.map((project) => {
+        const queueEntry = normalizeQueueEntry(queueEntries[getProjectQueueKey(project)]);
+
+        return {
+          ...project,
+          queueEntry,
+          queueStage: queueEntry?.stage || null,
+          queueStageLabel: queueEntry ? getQueueStageLabel(queueEntry.stage) : ""
+        };
+      }),
+    [allProjects, queueEntries]
+  );
+
+  const queueProjectCount = useMemo(
+    () => decoratedProjects.filter((project) => project.queueEntry).length,
+    [decoratedProjects]
+  );
+
+  const visibleRepositories = useMemo(() => {
+    if (!repositories.length) {
+      return repositories;
+    }
+
+    const queueRepo = {
+      id: QUEUE_REPO_ID,
+      name: "打印队列",
+      kind: "queue",
+      path: "",
+      projectCount: queueProjectCount
+    };
+    const nextRepositories = [...repositories];
+    const allRepoIndex = nextRepositories.findIndex((repo) => repo.id === "all");
+
+    if (allRepoIndex >= 0) {
+      nextRepositories.splice(allRepoIndex + 1, 0, queueRepo);
+    } else {
+      nextRepositories.unshift(queueRepo);
+    }
+
+    return nextRepositories;
+  }, [queueProjectCount, repositories]);
+
   const filteredProjects = useMemo(() => {
     const keyword = deferredSearchText.trim().toLowerCase();
     const repoFiltered =
       selectedRepoId === "all"
-        ? allProjects
-        : allProjects.filter((project) => project.repoId === selectedRepoId);
+        ? decoratedProjects
+        : selectedRepoId === QUEUE_REPO_ID
+          ? decoratedProjects.filter((project) => project.queueEntry)
+          : decoratedProjects.filter((project) => project.repoId === selectedRepoId);
 
     const keywordFiltered = !keyword
       ? repoFiltered
@@ -290,7 +434,7 @@ export default function App() {
         );
 
     return sortProjects(keywordFiltered, sortKey);
-  }, [allProjects, deferredSearchText, selectedRepoId, sortKey]);
+  }, [decoratedProjects, deferredSearchText, selectedRepoId, sortKey]);
 
   const totalPages = Math.max(1, Math.ceil(filteredProjects.length / PROJECTS_PER_PAGE));
   const pageProjects = useMemo(() => {
@@ -301,7 +445,7 @@ export default function App() {
   const selectedProject =
     selectedProjectId == null
       ? null
-      : allProjects.find((project) => project.id === selectedProjectId) || null;
+      : decoratedProjects.find((project) => project.id === selectedProjectId) || null;
 
   useEffect(() => {
     setCurrentPage(1);
@@ -312,6 +456,43 @@ export default function App() {
       setCurrentPage(totalPages);
     }
   }, [currentPage, totalPages]);
+
+  useEffect(() => {
+    if (!repositories.length && allProjects.length === 0) {
+      return;
+    }
+
+    const validQueueKeys = new Set(allProjects.map((project) => getProjectQueueKey(project)));
+
+    updateQueueEntries((currentEntries) => {
+      let changed = false;
+      const nextEntries = {};
+
+      for (const [queueKey, entry] of Object.entries(currentEntries)) {
+        if (!validQueueKeys.has(queueKey)) {
+          changed = true;
+          continue;
+        }
+
+        const normalizedEntry = normalizeQueueEntry(entry);
+        if (!normalizedEntry) {
+          changed = true;
+          continue;
+        }
+
+        if (
+          normalizedEntry.stage !== entry?.stage ||
+          normalizedEntry.markedAt !== entry?.markedAt
+        ) {
+          changed = true;
+        }
+
+        nextEntries[queueKey] = normalizedEntry;
+      }
+
+      return changed ? nextEntries : currentEntries;
+    });
+  }, [allProjects, repositories.length]);
 
   useEffect(() => {
     if (!hasDesktopApi) {
@@ -334,6 +515,7 @@ export default function App() {
         applyLibrarySnapshot({
           repositories: cacheResult.data.repositories || [],
           projects: cacheResult.data.projects || [],
+          virtualRepoIds: [QUEUE_REPO_ID],
           setRepositories,
           setAllProjects,
           setSelectedRepoId,
@@ -368,6 +550,7 @@ export default function App() {
       applyLibrarySnapshot({
         repositories: nextRepositories,
         projects: nextProjects,
+        virtualRepoIds: [QUEUE_REPO_ID],
         setRepositories,
         setAllProjects,
         setSelectedRepoId,
@@ -410,7 +593,9 @@ export default function App() {
   }
 
   async function pickTargetRepo(project) {
-    const targets = repositories.filter((repo) => repo.kind !== "overview" && repo.id !== project.repoId);
+    const targets = repositories.filter(
+      (repo) => repo.kind !== "overview" && repo.kind !== "queue" && repo.id !== project.repoId
+    );
 
     if (targets.length === 0) {
       return null;
@@ -437,6 +622,59 @@ export default function App() {
     return targets.find((repo) => repo.id === selectedRepoIdValue) || null;
   }
 
+  async function handleQueueProject(project) {
+    if (!project) {
+      return;
+    }
+
+    const queueKey = getProjectQueueKey(project);
+    const currentEntry = normalizeQueueEntry(queueEntries[queueKey]);
+    const selectedStage = await requestChoiceDialog({
+      title: currentEntry ? "更新队列状态" : "加入打印队列",
+      message: `为 “${project.title}” 选择当前阶段。`,
+      confirmLabel: currentEntry ? "更新状态" : "加入队列",
+      initialSelectedId: currentEntry?.stage || "printing",
+      options: QUEUE_STAGE_OPTIONS.map((option) => ({
+        id: option.id,
+        label: option.label
+      }))
+    });
+
+    if (!selectedStage) {
+      setStatus(currentEntry ? "已取消更新队列状态。" : "已取消加入打印队列。");
+      return;
+    }
+
+    const nextEntry = {
+      stage: normalizeQueueStage(selectedStage),
+      markedAt: currentEntry?.markedAt || new Date().toISOString()
+    };
+
+    updateQueueEntries((currentEntries) => ({
+      ...currentEntries,
+      [queueKey]: nextEntry
+    }));
+    setStatus(`项目 “${project.title}” 已标记为${getQueueStageLabel(nextEntry.stage)}。`);
+  }
+
+  function handleRemoveQueuedProject(project) {
+    if (!project) {
+      return;
+    }
+
+    const queueKey = getProjectQueueKey(project);
+    updateQueueEntries((currentEntries) => {
+      if (!currentEntries[queueKey]) {
+        return currentEntries;
+      }
+
+      const nextEntries = { ...currentEntries };
+      delete nextEntries[queueKey];
+      return nextEntries;
+    });
+    setStatus(`项目 “${project.title}” 已从打印队列移除。`);
+  }
+
   async function refreshRoot(
     targetRootPath,
     nextRepoId = selectedRepoId,
@@ -461,6 +699,7 @@ export default function App() {
       projects: nextProjects,
       nextRepoId,
       nextProjectId,
+      virtualRepoIds: [QUEUE_REPO_ID],
       setRepositories,
       setAllProjects,
       setSelectedRepoId,
@@ -566,9 +805,55 @@ export default function App() {
     setRepositories((currentRepositories) =>
       syncRepositoryCounts(currentRepositories, nextProjectsSnapshot || allProjects)
     );
-    setSelectedRepoId(result.project.repoId || selectedRepoId);
+    setSelectedRepoId((currentRepoId) =>
+      currentRepoId === QUEUE_REPO_ID ? QUEUE_REPO_ID : result.project.repoId || currentRepoId
+    );
     setSelectedProjectId(result.project.id);
     setStatus(`项目 “${result.project.title}” 已刷新。`);
+  }
+
+  async function handleEditProjectTags(project) {
+    if (!rootPath || !project) {
+      setStatus("当前没有可编辑标签的项目。");
+      return;
+    }
+
+    const nextTagText = await requestTextDialog({
+      title: "编辑标签",
+      message: `请编辑“${project.title}”的标签，多个标签用逗号分隔。留空可清空标签。`,
+      initialValue: (project.tags || []).join(", "),
+      placeholder: "例如：手办, 磁吸, 可动",
+      confirmLabel: "保存标签",
+      allowEmpty: true
+    });
+
+    if (nextTagText == null) {
+      setStatus("已取消编辑标签。");
+      return;
+    }
+
+    const nextTags = parseTagInput(nextTagText);
+    const result = await window.desktopAPI?.updateProjectTags?.(rootPath, project.projectPath, nextTags);
+
+    if (!result?.ok || !result.project) {
+      setStatus(result?.error || "更新标签失败。");
+      return;
+    }
+
+    let nextProjectsSnapshot = null;
+    setAllProjects((currentProjects) => {
+      nextProjectsSnapshot = upsertProject(currentProjects, project.projectPath, result.project);
+      return nextProjectsSnapshot;
+    });
+    setRepositories((currentRepositories) =>
+      syncRepositoryCounts(currentRepositories, nextProjectsSnapshot || allProjects)
+    );
+    setSelectedProjectId(result.project.id);
+    setStatus(
+      nextTags.length > 0
+        ? `项目“${result.project.title}”的标签已更新。`
+        : `项目“${result.project.title}”的标签已清空。`
+    );
   }
 
   async function handleDeleteProject(project) {
@@ -614,9 +899,10 @@ export default function App() {
           path="/"
           element={
             <LibraryPage
-              repositories={repositories}
+              repositories={visibleRepositories}
               projects={pageProjects}
               totalProjectCount={filteredProjects.length}
+              queueProjectCount={queueProjectCount}
               currentPage={currentPage}
               totalPages={totalPages}
               selectedRepoId={selectedRepoId}
@@ -638,6 +924,9 @@ export default function App() {
                 await refreshRoot(rootPath, selectedRepoId);
               }}
               onRefreshProject={handleRefreshProject}
+              onEditProjectTags={handleEditProjectTags}
+              onQueueProject={handleQueueProject}
+              onRemoveQueuedProject={handleRemoveQueuedProject}
               onRepoChange={(repoId) => {
                 setSelectedRepoId(repoId);
                 setSelectedProjectId(null);
@@ -783,7 +1072,7 @@ export default function App() {
         <TextInputDialog
           dialog={textDialog}
           onCancel={() => {
-            textDialog.resolve("");
+            textDialog.resolve(null);
             setTextDialog(null);
           }}
           onConfirm={(value) => {

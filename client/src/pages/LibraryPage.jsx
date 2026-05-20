@@ -23,6 +23,10 @@ function getRepoBadge(kind) {
     return "自定义仓库";
   }
 
+  if (kind === "queue") {
+    return "进行中";
+  }
+
   return "总览";
 }
 
@@ -55,6 +59,9 @@ function ProjectCard({
   onProjectChange,
   onOpenPath,
   onMoveProject,
+  onEditProjectTags,
+  onQueueProject,
+  onRemoveQueuedProject,
   onDeleteProject,
   onAuthorSearch,
   onTagSearch
@@ -136,6 +143,35 @@ function ProjectCard({
                 className="projectMenuItem"
                 onClick={() => {
                   setMenuOpen(false);
+                  onEditProjectTags(project);
+                }}
+              >
+                编辑标签
+              </button>
+              <button
+                className="projectMenuItem"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onQueueProject(project);
+                }}
+              >
+                {project.queueEntry ? "更新队列状态" : "加入打印队列"}
+              </button>
+              {project.queueEntry ? (
+                <button
+                  className="projectMenuItem"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onRemoveQueuedProject(project);
+                  }}
+                >
+                  移出打印队列
+                </button>
+              ) : null}
+              <button
+                className="projectMenuItem"
+                onClick={() => {
+                  setMenuOpen(false);
                   onDeleteProject(project);
                 }}
               >
@@ -151,9 +187,14 @@ function ProjectCard({
           <button className="projectTitleButton" onClick={() => onProjectChange(project.id)}>
             {project.title}
           </button>
-          <button className="projectAuthorButton" onClick={() => onAuthorSearch(project.author)}>
-            {project.author}
-          </button>
+          <div className="projectHeadingMeta">
+            <button className="projectAuthorButton" onClick={() => onAuthorSearch(project.author)}>
+              {project.author}
+            </button>
+            {project.queueEntry ? (
+              <span className={`queueStageBadge ${project.queueStage}`}>{project.queueStageLabel}</span>
+            ) : null}
+          </div>
         </div>
         <div className="projectChipRow">
           <span className="miniChip">ID {project.modelId || "-"}</span>
@@ -199,10 +240,14 @@ function ProjectListView({
   currentPage,
   totalPages,
   selectedRepoId,
+  queueProjectCount,
   sortKey,
   onProjectChange,
   onOpenPath,
   onMoveProject,
+  onEditProjectTags,
+  onQueueProject,
+  onRemoveQueuedProject,
   onDeleteProject,
   onAuthorSearch,
   onTagSearch,
@@ -217,7 +262,11 @@ function ProjectListView({
         <div>
           <h2>项目</h2>
           <p className="panelSubtle">
-            {selectedRepoId === "all" ? "当前显示全部项目" : "当前显示选中仓库中的项目"}
+            {selectedRepoId === "all"
+              ? "当前显示全部项目"
+              : selectedRepoId === "queue"
+                ? `当前显示打印队列中的 ${queueProjectCount} 个项目`
+                : "当前显示选中仓库中的项目"}
           </p>
         </div>
         <div className="panelHeaderActions">
@@ -247,13 +296,18 @@ function ProjectListView({
               onProjectChange={onProjectChange}
               onOpenPath={onOpenPath}
               onMoveProject={onMoveProject}
+              onEditProjectTags={onEditProjectTags}
+              onQueueProject={onQueueProject}
+              onRemoveQueuedProject={onRemoveQueuedProject}
               onDeleteProject={onDeleteProject}
               onAuthorSearch={onAuthorSearch}
               onTagSearch={onTagSearch}
             />
           ))
         ) : (
-          <div className="emptyState">当前没有可展示的项目。</div>
+          <div className="emptyState">
+            {selectedRepoId === "queue" ? "打印队列还是空的，先把项目标记进来吧。" : "当前没有可展示的项目。"}
+          </div>
         )}
       </div>
 
@@ -518,6 +572,9 @@ function ProjectDetailView({
   onOpenExternal,
   onOpenPath,
   onMoveProject,
+  onEditProjectTags,
+  onQueueProject,
+  onRemoveQueuedProject,
   onRefreshProject,
   onDeleteProject
 }) {
@@ -590,6 +647,10 @@ function ProjectDetailView({
   }, [detailPictureIndex, detailPictures.length]);
 
   const activeDetailPicture = detailPictures[detailPictureIndex] || null;
+  const documentItems = selectedProject.documentItems || [];
+  const materialSections = selectedProject.materialSections || [];
+  const hasDocuments = documentItems.length > 0;
+  const hasMaterials = materialSections.length > 0;
 
   return (
     <section className="panel detailPanel fullDetailPanel">
@@ -658,6 +719,38 @@ function ProjectDetailView({
                 type="button"
                 onClick={() => {
                   setMenuOpen(false);
+                  onEditProjectTags(selectedProject);
+                }}
+              >
+                编辑标签
+              </button>
+              <button
+                className="detailMenuItem"
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onQueueProject(selectedProject);
+                }}
+              >
+                {selectedProject.queueEntry ? "更新队列状态" : "加入打印队列"}
+              </button>
+              {selectedProject.queueEntry ? (
+                <button
+                  className="detailMenuItem"
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onRemoveQueuedProject(selectedProject);
+                  }}
+                >
+                  移出打印队列
+                </button>
+              ) : null}
+              <button
+                className="detailMenuItem"
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false);
                   onDeleteProject(selectedProject);
                 }}
               >
@@ -670,7 +763,14 @@ function ProjectDetailView({
 
       <div className="detailHeadline detailPageHeadline">
         <h2>{selectedProject.title}</h2>
-        <p className="subtle">{selectedProject.author}</p>
+        <div className="detailHeadlineMeta">
+          <p className="subtle">{selectedProject.author}</p>
+          {selectedProject.queueEntry ? (
+            <span className={`queueStageBadge ${selectedProject.queueStage}`}>
+              {selectedProject.queueStageLabel}
+            </span>
+          ) : null}
+        </div>
       </div>
 
       <div className="detailHero">
@@ -807,6 +907,64 @@ function ProjectDetailView({
         </div>
       </div>
 
+      {hasDocuments ? (
+        <section className="detailSection detailCompactSection">
+          <div className="panelHeader">
+            <h3>文档</h3>
+          </div>
+          <div className="detailDocumentList">
+            {documentItems.map((documentItem) => (
+              <button
+                key={`${documentItem.title}-${documentItem.path || documentItem.sourceUrl}`}
+                className="detailDocumentItem"
+                type="button"
+                onClick={() =>
+                  documentItem.path
+                    ? onOpenPath(documentItem.path)
+                    : documentItem.sourceUrl
+                      ? onOpenExternal(documentItem.sourceUrl)
+                      : undefined
+                }
+                disabled={!documentItem.path && !documentItem.sourceUrl}
+              >
+                <span className="detailDocumentTitle">{documentItem.title}</span>
+                <span className="detailDocumentMeta">
+                  {documentItem.fileName || (documentItem.sourceUrl ? "在线文档" : "无可用文件")}
+                </span>
+              </button>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {hasMaterials ? (
+        <section className="detailSection detailCompactSection">
+          <div className="panelHeader">
+            <h3>物料清单</h3>
+          </div>
+          <div className="materialSectionList">
+            {materialSections.map((section) => (
+              <article key={section.title} className="materialSectionCard">
+                {!/^boms_of_filaments$/i.test(section.title || "") ? <h4>{section.title}</h4> : null}
+                <div className="materialItemList">
+                  {section.items.map((item) => (
+                    <div key={`${item.name}-${item.sku}-${item.url}`} className="materialItem">
+                      <div className="materialItemMain">
+                        <div className="materialItemName">{item.name}</div>
+                        <div className="materialItemMeta">
+                          {item.sku ? <span className="miniChip">{item.sku}</span> : null}
+                          {item.quantity != null ? <span className="miniChip">x {item.quantity}</span> : null}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
       <section className="detailSection">
         <div className="panelHeader">
           <h3>项目描述</h3>
@@ -821,6 +979,7 @@ export function LibraryPage({
   repositories,
   projects,
   totalProjectCount,
+  queueProjectCount,
   currentPage,
   totalPages,
   selectedRepoId,
@@ -844,6 +1003,9 @@ export function LibraryPage({
   onRenameRepo,
   onDeleteRepo,
   onMoveProject,
+  onEditProjectTags,
+  onQueueProject,
+  onRemoveQueuedProject,
   onRefreshProject,
   onDeleteProject
 }) {
@@ -948,6 +1110,9 @@ export function LibraryPage({
               onOpenExternal={onOpenExternal}
               onOpenPath={onOpenPath}
               onMoveProject={onMoveProject}
+              onEditProjectTags={onEditProjectTags}
+              onQueueProject={onQueueProject}
+              onRemoveQueuedProject={onRemoveQueuedProject}
               onRefreshProject={onRefreshProject}
               onDeleteProject={onDeleteProject}
             />
@@ -955,6 +1120,7 @@ export function LibraryPage({
             <ProjectListView
               projects={projects}
               totalProjectCount={totalProjectCount}
+              queueProjectCount={queueProjectCount}
               currentPage={currentPage}
               totalPages={totalPages}
               selectedRepoId={selectedRepoId}
@@ -962,6 +1128,9 @@ export function LibraryPage({
               onProjectChange={onProjectChange}
               onOpenPath={onOpenPath}
               onMoveProject={onMoveProject}
+              onEditProjectTags={onEditProjectTags}
+              onQueueProject={onQueueProject}
+              onRemoveQueuedProject={onRemoveQueuedProject}
               onDeleteProject={onDeleteProject}
               onAuthorSearch={onSearchChange}
               onTagSearch={onSearchChange}
