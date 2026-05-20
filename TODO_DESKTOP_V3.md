@@ -57,6 +57,15 @@
 - 增加开发期开关，用于输出扫描统计信息
 - 必要时给桌面端增加性能调试面板
 
+### 7. 跨平台发布
+
+- 在 `client/package.json` 中补充 macOS 打包目标
+- 增加 macOS 所需的 `icon.icns`
+- 在 GitHub Actions 中增加 `macos-latest` 构建任务
+- 明确是否需要同时产出 `arm64`、`x64` 或 `universal`
+- 后续补充 Apple Developer 签名与 notarization 流程
+- 评估未签名测试包与正式发布包两套分发方式
+
 ## 可选增强
 
 - 改成虚拟列表，进一步降低超大项目库的渲染压力

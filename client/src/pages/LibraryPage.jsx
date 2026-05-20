@@ -1,5 +1,7 @@
 ﻿import { useEffect, useRef, useState } from "react";
 
+import { createPortal } from "react-dom";
+
 function getVisiblePageNumbers(currentPage, totalPages) {
   const startPage = Math.max(1, currentPage - 2);
   const endPage = Math.min(totalPages, startPage + 4);
@@ -48,7 +50,15 @@ function getTagColor(tag) {
   return TAG_SWATCHES[hash];
 }
 
-function ProjectCard({ project, onProjectChange, onOpenPath, onMoveProject, onAuthorSearch, onTagSearch }) {
+function ProjectCard({
+  project,
+  onProjectChange,
+  onOpenPath,
+  onMoveProject,
+  onDeleteProject,
+  onAuthorSearch,
+  onTagSearch
+}) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef(null);
 
@@ -122,6 +132,15 @@ function ProjectCard({ project, onProjectChange, onOpenPath, onMoveProject, onAu
               >
                 移动项目
               </button>
+              <button
+                className="projectMenuItem"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onDeleteProject(project);
+                }}
+              >
+                删除项目
+              </button>
             </div>
           ) : null}
         </div>
@@ -180,12 +199,15 @@ function ProjectListView({
   currentPage,
   totalPages,
   selectedRepoId,
+  sortKey,
   onProjectChange,
   onOpenPath,
   onMoveProject,
+  onDeleteProject,
   onAuthorSearch,
   onTagSearch,
-  onPageChange
+  onPageChange,
+  onSortChange
 }) {
   const visiblePages = getVisiblePageNumbers(currentPage, totalPages);
 
@@ -198,9 +220,22 @@ function ProjectListView({
             {selectedRepoId === "all" ? "当前显示全部项目" : "当前显示选中仓库中的项目"}
           </p>
         </div>
-        <span className="panelHint">
-          {totalProjectCount} 个结果 · 第 {currentPage} / {totalPages} 页
-        </span>
+        <div className="panelHeaderActions">
+          <label className="sortControl">
+            <span>排序</span>
+            <select value={sortKey} onChange={(event) => onSortChange(event.target.value)}>
+              <option value="updated-desc">最近更新</option>
+              <option value="updated-asc">最早更新</option>
+              <option value="title-asc">标题 A-Z</option>
+              <option value="title-desc">标题 Z-A</option>
+              <option value="author-asc">作者 A-Z</option>
+              <option value="author-desc">作者 Z-A</option>
+            </select>
+          </label>
+          <span className="panelHint">
+            {totalProjectCount} 个结果 · 第 {currentPage} / {totalPages} 页
+          </span>
+        </div>
       </div>
 
       <div className="projectGrid compactGrid">
@@ -212,6 +247,7 @@ function ProjectListView({
               onProjectChange={onProjectChange}
               onOpenPath={onOpenPath}
               onMoveProject={onMoveProject}
+              onDeleteProject={onDeleteProject}
               onAuthorSearch={onAuthorSearch}
               onTagSearch={onTagSearch}
             />
@@ -254,6 +290,140 @@ function ProjectListView({
         </div>
       ) : null}
     </section>
+  );
+}
+
+function RepoListItem({
+  repo,
+  index,
+  selectedRepoId,
+  onRepoChange,
+  onProjectChange,
+  onRenameRepo,
+  onDeleteRepo
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef(null);
+  const menuButtonRef = useRef(null);
+  const menuDropdownRef = useRef(null);
+  const canManage = repo.id === selectedRepoId && repo.kind === "custom";
+  let menuStyle = undefined;
+
+  if (menuOpen && menuButtonRef.current && typeof window !== "undefined") {
+    const rect = menuButtonRef.current.getBoundingClientRect();
+    const menuWidth = 164;
+    const menuHeight = 108;
+    const viewportPadding = 12;
+    const fitsBelow = rect.bottom + 8 + menuHeight <= window.innerHeight - viewportPadding;
+    const top = fitsBelow
+      ? rect.bottom + 8
+      : Math.max(viewportPadding, rect.top - menuHeight - 8);
+    const left = Math.min(rect.left, window.innerWidth - menuWidth - viewportPadding);
+
+    menuStyle = {
+      top: `${top}px`,
+      left: `${Math.max(viewportPadding, left)}px`
+    };
+  }
+
+  useEffect(() => {
+    if (!menuOpen) {
+      return undefined;
+    }
+
+    function handlePointerDown(event) {
+      const clickedInsideButton = menuRef.current?.contains(event.target);
+      const clickedInsideDropdown = menuDropdownRef.current?.contains(event.target);
+
+      if (!clickedInsideButton && !clickedInsideDropdown) {
+        setMenuOpen(false);
+      }
+    }
+
+    function handleEscape(event) {
+      if (event.key === "Escape") {
+        setMenuOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleEscape);
+
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [menuOpen]);
+
+  return (
+    <div
+      className={`repoCard repoListItem ${repo.id === selectedRepoId ? "active" : ""} ${
+        index === 0 ? "repoPinned" : ""
+      }`}
+    >
+      <button
+        className={`repoSelect ${canManage ? "repoSelectWithMenu" : ""}`}
+        onClick={() => {
+          onRepoChange(repo.id);
+          onProjectChange(null);
+        }}
+      >
+        <div className="repoTop">
+          <div className="repoIdentity">
+            <span className="repoDot" />
+            <span className="repoName">{repo.name}</span>
+          </div>
+          <span className={`repoBadge ${repo.kind}`}>{getRepoBadge(repo.kind)}</span>
+        </div>
+        <div className="repoMeta">{repo.projectCount} 个项目</div>
+      </button>
+
+      {canManage ? (
+        <div className="repoMenu" ref={menuRef}>
+          <button
+            className="repoMenuButton"
+            type="button"
+            aria-label="打开仓库菜单"
+            ref={menuButtonRef}
+            onClick={() => setMenuOpen((current) => !current)}
+          >
+            <svg className="repoMenuIcon" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="5" cy="12" r="1.8" />
+              <circle cx="12" cy="12" r="1.8" />
+              <circle cx="19" cy="12" r="1.8" />
+            </svg>
+          </button>
+          {menuOpen && menuStyle
+            ? createPortal(
+                <div className="repoMenuDropdown" style={menuStyle} ref={menuDropdownRef}>
+              <button
+                className="repoMenuItem"
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onRenameRepo(repo);
+                }}
+              >
+                重命名
+              </button>
+              <button
+                className="repoMenuItem repoMenuItemDanger"
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onDeleteRepo(repo);
+                }}
+                disabled={repo.projectCount > 0}
+              >
+                删除空仓库
+              </button>
+                </div>,
+                document.body
+              )
+            : null}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -348,7 +518,8 @@ function ProjectDetailView({
   onOpenExternal,
   onOpenPath,
   onMoveProject,
-  onRefreshProject
+  onRefreshProject,
+  onDeleteProject
 }) {
   const detailPictures = selectedProject.pictureItems || [];
   const [detailPictureIndex, setDetailPictureIndex] = useState(0);
@@ -481,6 +652,16 @@ function ProjectDetailView({
                 }}
               >
                 移动到仓库
+              </button>
+              <button
+                className="detailMenuItem"
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onDeleteProject(selectedProject);
+                }}
+              >
+                删除项目
               </button>
             </div>
           ) : null}
@@ -646,21 +827,25 @@ export function LibraryPage({
   selectedProject,
   rootPath,
   searchText,
+  sortKey,
   status,
   canPickRoot = true,
   onPickRoot,
+  onImport3mf,
   onRefresh,
   onRepoChange,
   onProjectChange,
   onPageChange,
   onSearchChange,
+  onSortChange,
   onOpenExternal,
   onOpenPath,
   onCreateRepo,
   onRenameRepo,
   onDeleteRepo,
   onMoveProject,
-  onRefreshProject
+  onRefreshProject,
+  onDeleteProject
 }) {
   const isDetailMode = Boolean(selectedProject);
 
@@ -707,6 +892,9 @@ export function LibraryPage({
               <button className="primaryButton" onClick={onCreateRepo} disabled={!rootPath}>
                 创建仓库
               </button>
+              <button className="secondaryButton" onClick={onImport3mf} disabled={!rootPath}>
+                导入 3MF
+              </button>
               <button className="secondaryButton" onClick={onRefresh} disabled={!rootPath}>
                 重新扫描
               </button>
@@ -735,43 +923,16 @@ export function LibraryPage({
           <div className="repoList">
             {repositories.length > 0 ? (
               repositories.map((repo, index) => (
-                <div
+                <RepoListItem
                   key={repo.id}
-                  className={`repoCard repoListItem ${repo.id === selectedRepoId ? "active" : ""} ${
-                    index === 0 ? "repoPinned" : ""
-                  }`}
-                >
-                  <button
-                    className="repoSelect"
-                    onClick={() => {
-                      onRepoChange(repo.id);
-                      onProjectChange(null);
-                    }}
-                  >
-                    <div className="repoTop">
-                      <div className="repoIdentity">
-                        <span className="repoDot" />
-                        <span className="repoName">{repo.name}</span>
-                      </div>
-                      <span className={`repoBadge ${repo.kind}`}>{getRepoBadge(repo.kind)}</span>
-                    </div>
-                    <div className="repoMeta">{repo.projectCount} 个项目</div>
-                  </button>
-                  {repo.id === selectedRepoId && repo.kind === "custom" ? (
-                    <div className="cardActions">
-                      <button className="ghostButton" onClick={() => onRenameRepo(repo)}>
-                        重命名
-                      </button>
-                      <button
-                        className="secondaryButton dangerButton"
-                        onClick={() => onDeleteRepo(repo)}
-                        disabled={repo.projectCount > 0}
-                      >
-                        删除空仓库
-                      </button>
-                    </div>
-                  ) : null}
-                </div>
+                  repo={repo}
+                  index={index}
+                  selectedRepoId={selectedRepoId}
+                  onRepoChange={onRepoChange}
+                  onProjectChange={onProjectChange}
+                  onRenameRepo={onRenameRepo}
+                  onDeleteRepo={onDeleteRepo}
+                />
               ))
             ) : (
               <div className="emptyState">请选择根目录后开始扫描。</div>
@@ -788,6 +949,7 @@ export function LibraryPage({
               onOpenPath={onOpenPath}
               onMoveProject={onMoveProject}
               onRefreshProject={onRefreshProject}
+              onDeleteProject={onDeleteProject}
             />
           ) : (
             <ProjectListView
@@ -796,12 +958,15 @@ export function LibraryPage({
               currentPage={currentPage}
               totalPages={totalPages}
               selectedRepoId={selectedRepoId}
+              sortKey={sortKey}
               onProjectChange={onProjectChange}
               onOpenPath={onOpenPath}
               onMoveProject={onMoveProject}
+              onDeleteProject={onDeleteProject}
               onAuthorSearch={onSearchChange}
               onTagSearch={onSearchChange}
               onPageChange={onPageChange}
+              onSortChange={onSortChange}
             />
           )}
         </section>

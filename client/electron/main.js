@@ -1,6 +1,9 @@
-﻿const path = require("path");
+const path = require("path");
 const crypto = require("crypto");
 const fs = require("fs/promises");
+const { pathToFileURL } = require("url");
+const AdmZip = require("adm-zip");
+const { XMLParser } = require("fast-xml-parser");
 const { app, BrowserWindow, Menu, dialog, ipcMain, protocol, shell } = require("electron");
 
 const isDev = !app.isPackaged;
@@ -17,6 +20,21 @@ const LOCAL_ASSET_CONTENT_TYPES = {
   ".avif": "image/avif"
 };
 const LIBRARY_CACHE_VERSION = 2;
+const THREE_MF_XML_PARSER = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: "",
+  parseTagValue: false,
+  trimValues: false
+});
+const REPO_MARKER_FILE_NAME = ".mw-repo.json";
+const INSTANCE_COVER_CANDIDATES = [
+  "instance-cover.jpg",
+  "instance-cover.jpeg",
+  "instance-cover.png",
+  "instance-cover.webp",
+  "instance-cover.gif"
+];
+const INVALID_COMPATIBILITY_CODES = new Set(["O1D", "O1S", "N1"]);
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -77,19 +95,11 @@ function showAboutDialog() {
 }
 
 function buildApplicationMenu() {
-  const template = [
-    {
-      role: "fileMenu"
-    },
-    {
-      role: "editMenu"
-    },
-    {
-      role: "viewMenu"
-    },
-    {
-      role: "windowMenu"
-    },
+  return Menu.buildFromTemplate([
+    { role: "fileMenu" },
+    { role: "editMenu" },
+    { role: "viewMenu" },
+    { role: "windowMenu" },
     {
       role: "help",
       submenu: [
@@ -101,9 +111,7 @@ function buildApplicationMenu() {
         }
       ]
     }
-  ];
-
-  return Menu.buildFromTemplate(template);
+  ]);
 }
 
 app.whenReady().then(() => {
@@ -151,86 +159,13 @@ app.on("window-all-closed", () => {
   }
 });
 
-ipcMain.handle("dialog:pick-directory", async () => {
-  const result = await dialog.showOpenDialog({
-    properties: ["openDirectory", "createDirectory"]
-  });
-
-  if (result.canceled || result.filePaths.length === 0) {
-    return { ok: false, canceled: true };
+function asArray(value) {
+  if (Array.isArray(value)) {
+    return value;
   }
 
-  return { ok: true, path: result.filePaths[0] };
-});
-
-ipcMain.handle("shell:open-path", async (_event, targetPath) => {
-  if (!targetPath) {
-    return { ok: false, error: "缺少路径。" };
-  }
-
-  const errorMessage = await shell.openPath(targetPath);
-  if (errorMessage) {
-    return { ok: false, error: errorMessage };
-  }
-
-  return { ok: true };
-});
-
-ipcMain.handle("shell:open-external", async (_event, url) => {
-  if (!url) {
-    return { ok: false, error: "缺少链接。" };
-  }
-
-  await shell.openExternal(url);
-  return { ok: true };
-});
-
-async function openContainingFolder(targetPath) {
-  if (!targetPath) {
-    return { ok: false, error: "缺少路径。" };
-  }
-
-  const resolvedPath = path.resolve(targetPath);
-
-  try {
-    const stats = await fs.stat(resolvedPath);
-    if (stats.isDirectory()) {
-      const errorMessage = await shell.openPath(resolvedPath);
-      return errorMessage ? { ok: false, error: errorMessage } : { ok: true };
-    }
-
-    shell.showItemInFolder(resolvedPath);
-    return { ok: true };
-  } catch {
-    return { ok: false, error: "目标路径不存在。" };
-  }
+  return value == null ? [] : [value];
 }
-
-ipcMain.handle("instance:show-context-menu", async (event, targetPath) => {
-  if (!targetPath) {
-    return { ok: false, error: "缺少路径。" };
-  }
-
-  const win = BrowserWindow.fromWebContents(event.sender);
-  if (!win) {
-    return { ok: false, error: "无法打开菜单。" };
-  }
-
-  const menu = Menu.buildFromTemplate([
-    {
-      label: "打开所在文件夹",
-      click: () => {
-        void openContainingFolder(targetPath);
-      }
-    }
-  ]);
-
-  menu.popup({
-    window: win
-  });
-
-  return { ok: true };
-});
 
 async function exists(targetPath) {
   try {
@@ -243,6 +178,85 @@ async function exists(targetPath) {
 
 async function readJsonFile(filePath) {
   return JSON.parse(await fs.readFile(filePath, "utf8"));
+}
+
+async function readDirectoryEntriesSafe(targetPath) {
+  try {
+    return await fs.readdir(targetPath, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+
+function sanitizeFolderName(value) {
+  return String(value || "")
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001F]+/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+function getRepoMarkerPath(repoPath) {
+  return path.join(repoPath, REPO_MARKER_FILE_NAME);
+}
+
+async function hasRepoMarker(repoPath) {
+  return exists(getRepoMarkerPath(repoPath));
+}
+
+async function ensureRepoMarker(repoPath, repoName = path.basename(repoPath)) {
+  const markerPath = getRepoMarkerPath(repoPath);
+  const markerPayload = {
+    type: "makerworld-helper-repo",
+    name: repoName,
+    createdAt: new Date().toISOString()
+  };
+
+  await fs.mkdir(repoPath, { recursive: true });
+  await fs.writeFile(markerPath, JSON.stringify(markerPayload, null, 2), "utf8");
+}
+
+function toFileSrc(targetPath, versionToken = "") {
+  if (!targetPath) {
+    return "";
+  }
+
+  const baseUrl = `${LOCAL_ASSET_SCHEME}://local/${encodeURIComponent(targetPath)}`;
+  return versionToken ? `${baseUrl}?v=${encodeURIComponent(versionToken)}` : baseUrl;
+}
+
+async function getAssetDescriptor(targetPath) {
+  try {
+    const stats = await fs.stat(targetPath);
+    return {
+      path: targetPath,
+      src: toFileSrc(targetPath, String(Math.trunc(stats.mtimeMs))),
+      mtimeMs: stats.mtimeMs
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function getFirstExistingAssetDescriptor(candidatePaths) {
+  for (const candidatePath of candidatePaths) {
+    const asset = await getAssetDescriptor(candidatePath);
+    if (asset) {
+      return asset;
+    }
+  }
+
+  return null;
+}
+
+async function getPathStatSignature(targetPath) {
+  try {
+    const stats = await fs.stat(targetPath);
+    return `${path.basename(targetPath)}:${stats.size}:${Math.trunc(stats.mtimeMs)}`;
+  } catch {
+    return `${path.basename(targetPath)}:missing`;
+  }
 }
 
 function getLibraryCachePath(rootPath) {
@@ -290,60 +304,6 @@ async function writeLibraryCache(rootPath, data) {
   );
 }
 
-async function readDirectoryEntriesSafe(targetPath) {
-  try {
-    return await fs.readdir(targetPath, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-}
-
-function toFileSrc(targetPath, versionToken = "") {
-  if (!targetPath) {
-    return "";
-  }
-
-  const baseUrl = `${LOCAL_ASSET_SCHEME}://local/${encodeURIComponent(targetPath)}`;
-  return versionToken ? `${baseUrl}?v=${encodeURIComponent(versionToken)}` : baseUrl;
-}
-
-async function getAssetDescriptor(targetPath) {
-  try {
-    const stats = await fs.stat(targetPath);
-    return {
-      path: targetPath,
-      src: toFileSrc(targetPath, String(Math.trunc(stats.mtimeMs))),
-      mtimeMs: stats.mtimeMs
-    };
-  } catch {
-    return null;
-  }
-}
-
-async function getPathStatSignature(targetPath) {
-  try {
-    const stats = await fs.stat(targetPath);
-    return `${path.basename(targetPath)}:${stats.size}:${Math.trunc(stats.mtimeMs)}`;
-  } catch {
-    return `${path.basename(targetPath)}:missing`;
-  }
-}
-
-async function getProjectFingerprint(projectPath) {
-  const fingerprintParts = await Promise.all([
-    getPathStatSignature(path.join(projectPath, "metadata.json")),
-    getPathStatSignature(path.join(projectPath, "save-manifest.json")),
-    getPathStatSignature(path.join(projectPath, "instances")),
-    getPathStatSignature(path.join(projectPath, "model", "images"))
-  ]);
-
-  return fingerprintParts.join("|");
-}
-
-function asArray(value) {
-  return Array.isArray(value) ? value : [];
-}
-
 function getModelFileType(fileName) {
   return path.extname(fileName || "").replace(/^\./, "").toLowerCase();
 }
@@ -351,8 +311,6 @@ function getModelFileType(fileName) {
 function isSupportedModelFile(fileName) {
   return MODEL_FILE_EXTENSIONS.has(getModelFileType(fileName));
 }
-
-const INVALID_COMPATIBILITY_CODES = new Set(["O1D", "O1S", "N1"]);
 
 function normalizeCompatibilityName(value) {
   const text = String(value || "").trim();
@@ -435,6 +393,7 @@ function formatCompatibility(instance) {
     if (seen.has(normalized)) {
       continue;
     }
+
     seen.add(normalized);
     unique.push(item);
   }
@@ -481,13 +440,7 @@ async function buildPictureItems(projectPath, manifest) {
 
 function getInstanceDirectoryName(instance) {
   const raw = `${instance?.id || "instance"}-${instance?.title || "profile"}`;
-  const sanitized = String(raw)
-    .trim()
-    .replace(/[<>:"/\\|?*\u0000-\u001F]+/g, "-")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "");
-
+  const sanitized = sanitizeFolderName(raw);
   return sanitized || `instance-${instance?.id || "x"}`;
 }
 
@@ -495,85 +448,95 @@ async function buildInstanceItems(projectPath, metadata, manifest) {
   const manifestModelFiles = asArray(manifest?.assets?.modelFiles);
   const manifestPlateFiles = asArray(manifest?.assets?.plates);
 
-  const instances = await Promise.all(asArray(metadata?.instances).map(async (instance) => {
-    const instanceDir = getInstanceDirectoryName(instance);
-    const coverPath = path.join(projectPath, "instances", instanceDir, "instance-cover.jpg");
-    const filesDir = path.join(projectPath, "instances", instanceDir, "files");
-    const coverAsset = await getAssetDescriptor(coverPath);
+  const instances = await Promise.all(
+    asArray(metadata?.instances).map(async (instance) => {
+      const instanceDir = getInstanceDirectoryName(instance);
+      const filesDir = path.join(projectPath, "instances", instanceDir, "files");
+      const coverAsset = await getFirstExistingAssetDescriptor(
+        INSTANCE_COVER_CANDIDATES.map((fileName) => path.join(projectPath, "instances", instanceDir, fileName))
+      );
 
-    const plateItems = (
-      await Promise.all(
-        manifestPlateFiles
-          .filter((item) => item.instanceId === instance.id)
-          .slice(0, 6)
-          .map(async (plate) => {
-            const localPath = path.join(projectPath, "instances", instanceDir, "plates", plate.fileName || "");
-            const asset = await getAssetDescriptor(localPath);
-            if (!asset) {
-              return null;
-            }
+      const plateItems = (
+        await Promise.all(
+          manifestPlateFiles
+            .filter((item) => item.instanceId === instance.id)
+            .slice(0, 6)
+            .map(async (plate) => {
+              const localPath = path.join(projectPath, "instances", instanceDir, "plates", plate.fileName || "");
+              const asset = await getAssetDescriptor(localPath);
+              if (!asset) {
+                return null;
+              }
 
-            return {
-              fileName: plate.fileName,
-              path: asset.path,
-              src: asset.src
-            };
-          })
-      )
-    ).filter(Boolean);
+              return {
+                fileName: plate.fileName,
+                path: asset.path,
+                src: asset.src
+              };
+            })
+        )
+      ).filter(Boolean);
 
-    const modelFiles = [];
-    for (const file of manifestModelFiles.filter((item) => item.instanceId === instance.id)) {
-      const localPath = path.join(projectPath, "instances", instanceDir, "files", file.fileName || "");
-      if (!(await exists(localPath))) {
-        continue;
-      }
-
-      modelFiles.push({
-        fileName: file.fileName,
-        path: localPath,
-        type: file.type || "file"
-      });
-    }
-
-    if (modelFiles.length === 0) {
-      const fileEntries = await readDirectoryEntriesSafe(filesDir);
-      for (const entry of fileEntries) {
-        if (!entry.isFile()) {
+      const modelFiles = [];
+      for (const file of manifestModelFiles.filter((item) => item.instanceId === instance.id)) {
+        const localPath = path.join(filesDir, file.fileName || "");
+        if (!(await exists(localPath))) {
           continue;
         }
 
-        if (!isSupportedModelFile(entry.name)) {
-          continue;
-        }
-
-        const localPath = path.join(filesDir, entry.name);
         modelFiles.push({
-          fileName: entry.name,
+          fileName: file.fileName,
           path: localPath,
-          type: getModelFileType(entry.name) || "file"
+          type: file.type || "file"
         });
       }
-    }
 
-    return {
-      id: instance.id,
-      profileId: instance.profileId,
-      title: instance.title || `实例 ${instance.id}`,
-      machine: formatCompatibility(instance),
-      coverSrc: coverAsset?.src || instance.coverUrl || "",
-      coverPath: coverAsset?.path || "",
-      plateItems,
-      modelFiles,
-      filesDirectoryPath: filesDir,
-      materialCount: instance.materialCount ?? 0,
-      downloadCount: instance.downloadCount ?? 0,
-      predictionSeconds: instance.predictionSeconds ?? null,
-      weightGrams: instance.weightGrams ?? null
-    };
-  }));
+      if (modelFiles.length === 0) {
+        const fileEntries = await readDirectoryEntriesSafe(filesDir);
+        for (const entry of fileEntries) {
+          if (!entry.isFile() || !isSupportedModelFile(entry.name)) {
+            continue;
+          }
+
+          const localPath = path.join(filesDir, entry.name);
+          modelFiles.push({
+            fileName: entry.name,
+            path: localPath,
+            type: getModelFileType(entry.name) || "file"
+          });
+        }
+      }
+
+      return {
+        id: instance.id,
+        profileId: instance.profileId,
+        title: instance.title || `实例 ${instance.id}`,
+        machine: formatCompatibility(instance),
+        coverSrc: coverAsset?.src || instance.coverUrl || "",
+        coverPath: coverAsset?.path || "",
+        plateItems,
+        modelFiles,
+        filesDirectoryPath: filesDir,
+        materialCount: instance.materialCount ?? 0,
+        downloadCount: instance.downloadCount ?? 0,
+        predictionSeconds: instance.predictionSeconds ?? null,
+        weightGrams: instance.weightGrams ?? null
+      };
+    })
+  );
 
   return instances;
+}
+
+async function getProjectFingerprint(projectPath) {
+  const fingerprintParts = await Promise.all([
+    getPathStatSignature(path.join(projectPath, "metadata.json")),
+    getPathStatSignature(path.join(projectPath, "save-manifest.json")),
+    getPathStatSignature(path.join(projectPath, "instances")),
+    getPathStatSignature(path.join(projectPath, "model", "images"))
+  ]);
+
+  return fingerprintParts.join("|");
 }
 
 async function readProject(projectPath, repo, cachedProject = null) {
@@ -610,6 +573,9 @@ async function readProject(projectPath, repo, cachedProject = null) {
     title: metadata?.model?.title || path.basename(projectPath),
     author: metadata?.creator?.name || "未知作者",
     modelId: String(metadata?.model?.id ?? ""),
+    capturedAt: metadata?.capturedAt || "",
+    createdAt: metadata?.model?.createdAt || "",
+    updatedAt: metadata?.model?.updatedAt || "",
     tags: asArray(metadata?.model?.tags),
     summaryHtml: metadata?.model?.summaryHtml || "",
     summaryText: metadata?.model?.summaryText || "",
@@ -639,6 +605,7 @@ async function scanRootDirectory(rootPath) {
     path: rootPath,
     projectCount: 0
   };
+
   const scannedEntries = await Promise.all(
     dirents
       .filter((dirent) => dirent.isDirectory())
@@ -670,6 +637,16 @@ async function scanRootDirectory(rootPath) {
         ).filter(Boolean);
 
         repo.projectCount = repoProjects.length;
+        const markerExists = await hasRepoMarker(fullPath);
+
+        if (repo.projectCount === 0 && !markerExists) {
+          return null;
+        }
+
+        if (repo.projectCount > 0 && !markerExists) {
+          await ensureRepoMarker(fullPath, repo.name);
+        }
+
         return { type: "repo", repo, projects: repoProjects };
       })
   );
@@ -678,6 +655,10 @@ async function scanRootDirectory(rootPath) {
   const projects = [];
 
   for (const entry of scannedEntries) {
+    if (!entry) {
+      continue;
+    }
+
     if (entry.type === "root-project") {
       projects.push(entry.project);
       rootRepo.projectCount += 1;
@@ -735,6 +716,549 @@ function resolveProjectRepo(rootPath, projectPath) {
     projectCount: 0
   };
 }
+
+function isPathInside(parentPath, childPath) {
+  const relativePath = path.relative(parentPath, childPath);
+  return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
+}
+
+function decodeHtmlEntities(value) {
+  let text = String(value || "");
+  const namedEntities = {
+    "&lt;": "<",
+    "&gt;": ">",
+    "&amp;": "&",
+    "&quot;": "\"",
+    "&#34;": "\"",
+    "&apos;": "'",
+    "&#39;": "'",
+    "&nbsp;": " "
+  };
+
+  for (let round = 0; round < 3; round += 1) {
+    const nextText = text
+      .replace(/&(lt|gt|amp|quot|apos|nbsp);|&#34;|&#39;/g, (match) => namedEntities[match] || match)
+      .replace(/&#(\d+);/g, (_match, codePoint) => {
+        const numericCode = Number.parseInt(codePoint, 10);
+        return Number.isFinite(numericCode) ? String.fromCodePoint(numericCode) : _match;
+      });
+
+    if (nextText === text) {
+      break;
+    }
+
+    text = nextText;
+  }
+
+  return text;
+}
+
+function stripHtmlTags(value) {
+  return decodeHtmlEntities(value)
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizePrinterDisplayName(value) {
+  const text = String(value || "")
+    .replace(/^Bambu Lab\s+/i, "")
+    .replace(/\s+\d+(?:\.\d+)?\s*nozzle$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return normalizeCompatibilityName(text);
+}
+
+function uniqueStrings(values) {
+  const result = [];
+  const seen = new Set();
+
+  for (const value of values) {
+    const text = String(value || "").trim();
+    if (!text) {
+      continue;
+    }
+
+    const normalized = text.toUpperCase();
+    if (seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    result.push(text);
+  }
+
+  return result;
+}
+
+function buildCompatibilityPayload(machineNames) {
+  const normalizedMachines = uniqueStrings(machineNames.map(normalizePrinterDisplayName).filter(Boolean));
+  return {
+    compatibility: normalizedMachines[0] ? { devProductName: normalizedMachines[0] } : null,
+    otherCompatibility: normalizedMachines.slice(1).map((name) => ({ devProductName: name })),
+    compatibilityText: normalizedMachines.join(" / ")
+  };
+}
+
+function getZipEntries(zip, predicate) {
+  return zip
+    .getEntries()
+    .filter((entry) => !entry.isDirectory && predicate(entry.entryName))
+    .map((entry) => entry.entryName);
+}
+
+function readZipEntryText(zip, entryName) {
+  const entry = zip.getEntry(entryName);
+  if (!entry) {
+    return "";
+  }
+
+  return entry.getData().toString("utf8");
+}
+
+function sortPlateEntryNames(entryNames) {
+  return [...entryNames].sort((left, right) => {
+    const leftMatch = left.match(/plate_(\d+)/i);
+    const rightMatch = right.match(/plate_(\d+)/i);
+    const leftIndex = leftMatch ? Number.parseInt(leftMatch[1], 10) : 0;
+    const rightIndex = rightMatch ? Number.parseInt(rightMatch[1], 10) : 0;
+    return leftIndex - rightIndex;
+  });
+}
+
+function parse3mfModelMetadata(zip) {
+  const xml = readZipEntryText(zip, "3D/3dmodel.model");
+  if (!xml) {
+    return {};
+  }
+
+  const parsed = THREE_MF_XML_PARSER.parse(xml);
+  const metadataEntries = asArray(parsed?.model?.metadata);
+  const metadata = {};
+
+  for (const entry of metadataEntries) {
+    if (!entry || typeof entry !== "object" || !entry.name) {
+      continue;
+    }
+
+    metadata[entry.name] = typeof entry["#text"] === "string" ? entry["#text"] : "";
+  }
+
+  return metadata;
+}
+
+function parseProjectSettings(zip) {
+  const content = readZipEntryText(zip, "Metadata/project_settings.config");
+  if (!content) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(content);
+  } catch {
+    return {};
+  }
+}
+
+function buildFilamentList(projectSettings) {
+  const types = asArray(projectSettings?.filament_type);
+  const colors = asArray(projectSettings?.filament_colour);
+  const total = Math.max(types.length, colors.length);
+
+  return Array.from({ length: total }, (_item, index) => ({
+    type: String(types[index] || "").trim() || "未知耗材",
+    color: String(colors[index] || "").trim() || ""
+  })).filter((item) => item.type || item.color);
+}
+
+function buildImportedPictureSource(filePath, entryName) {
+  return `${pathToFileURL(filePath).href}#${entryName}`;
+}
+
+async function ensureUniqueProjectDirectory(baseDirectory, preferredName) {
+  const sanitizedBaseName = sanitizeFolderName(preferredName) || "导入项目";
+  let currentName = sanitizedBaseName;
+  let suffix = 2;
+
+  while (await exists(path.join(baseDirectory, currentName))) {
+    currentName = `${sanitizedBaseName}-${suffix}`;
+    suffix += 1;
+  }
+
+  return {
+    name: currentName,
+    path: path.join(baseDirectory, currentName)
+  };
+}
+
+function allocateUniqueFileName(fileName, usedNames) {
+  const extension = path.extname(fileName);
+  const baseName = path.basename(fileName, extension);
+  let nextName = fileName;
+  let suffix = 2;
+
+  while (usedNames.has(nextName.toLowerCase())) {
+    nextName = `${baseName}-${suffix}${extension}`;
+    suffix += 1;
+  }
+
+  usedNames.add(nextName.toLowerCase());
+  return nextName;
+}
+
+async function copyZipEntryToFile(zip, entryName, targetPath) {
+  const entry = zip.getEntry(entryName);
+  if (!entry) {
+    return false;
+  }
+
+  await fs.mkdir(path.dirname(targetPath), { recursive: true });
+  await fs.writeFile(targetPath, entry.getData());
+  return true;
+}
+
+async function importSingle3mfProject(rootPath, targetDirectory, filePath) {
+  const zip = new AdmZip(filePath);
+  const modelMetadata = parse3mfModelMetadata(zip);
+  const projectSettings = parseProjectSettings(zip);
+  const fileBaseName = path.basename(filePath, path.extname(filePath));
+  const title = decodeHtmlEntities(modelMetadata.Title || fileBaseName).trim() || fileBaseName;
+  const descriptionHtml = decodeHtmlEntities(modelMetadata.Description || "");
+  const summaryText = stripHtmlTags(descriptionHtml);
+  const designerName = decodeHtmlEntities(modelMetadata.Designer || "").trim() || "未知作者";
+  const importedAt = new Date().toISOString();
+  const projectDirectory = await ensureUniqueProjectDirectory(targetDirectory, title);
+  const modelImagesDirectory = path.join(projectDirectory.path, "model", "images");
+  const machineNames = [
+    projectSettings?.printer_model,
+    ...asArray(projectSettings?.print_compatible_printers),
+    ...asArray(projectSettings?.upward_compatible_machine)
+  ];
+  const compatibilityPayload = buildCompatibilityPayload(machineNames);
+  const filaments = buildFilamentList(projectSettings);
+  const instanceId = `import-${crypto.createHash("sha1").update(filePath).digest("hex").slice(0, 10)}`;
+  const instanceTitle = String(projectSettings?.print_settings_id || fileBaseName).trim() || "导入配置";
+  const instanceDirectoryName = getInstanceDirectoryName({
+    id: instanceId,
+    title: instanceTitle
+  });
+  const instanceBasePath = path.join(projectDirectory.path, "instances", instanceDirectoryName);
+  const filesDirectory = path.join(instanceBasePath, "files");
+  const platesDirectory = path.join(instanceBasePath, "plates");
+  const usedModelImageNames = new Set();
+  const manifestPictures = [];
+  const modelPictureEntries = getZipEntries(zip, (entryName) => entryName.startsWith("Auxiliaries/Model Pictures/"));
+  const coverEntryName =
+    [
+      "Auxiliaries/.thumbnails/thumbnail_middle.png",
+      "Auxiliaries/.thumbnails/thumbnail_3mf.png",
+      "Auxiliaries/.thumbnails/thumbnail_small.png"
+    ].find((entryName) => zip.getEntry(entryName)) || modelPictureEntries[0] || "";
+  const plateEntryNames = sortPlateEntryNames(
+    getZipEntries(zip, (entryName) => /^Metadata\/plate_\d+\.(png|jpg|jpeg|webp)$/i.test(entryName))
+  );
+
+  await fs.mkdir(modelImagesDirectory, { recursive: true });
+  await fs.mkdir(filesDirectory, { recursive: true });
+  await fs.mkdir(platesDirectory, { recursive: true });
+  await fs.copyFile(filePath, path.join(filesDirectory, path.basename(filePath)));
+
+  let coverFileName = "";
+
+  if (coverEntryName) {
+    coverFileName = allocateUniqueFileName(path.basename(coverEntryName), usedModelImageNames);
+    await copyZipEntryToFile(zip, coverEntryName, path.join(modelImagesDirectory, coverFileName));
+    const instanceCoverFileName = `instance-cover${path.extname(coverFileName).toLowerCase() || ".png"}`;
+    await copyZipEntryToFile(zip, coverEntryName, path.join(instanceBasePath, instanceCoverFileName));
+  }
+
+  for (const entryName of modelPictureEntries) {
+    const sourceFileName = path.basename(entryName);
+    const targetFileName = allocateUniqueFileName(sourceFileName, usedModelImageNames);
+    await copyZipEntryToFile(zip, entryName, path.join(modelImagesDirectory, targetFileName));
+    manifestPictures.push({
+      source: buildImportedPictureSource(filePath, entryName),
+      fileName: targetFileName
+    });
+  }
+
+  if (!coverFileName && manifestPictures[0]?.fileName) {
+    coverFileName = manifestPictures[0].fileName;
+  }
+
+  const manifestPlates = [];
+  for (const entryName of plateEntryNames) {
+    const plateFileName = path.basename(entryName);
+    await copyZipEntryToFile(zip, entryName, path.join(platesDirectory, plateFileName));
+    const plateMatch = entryName.match(/plate_(\d+)/i);
+    manifestPlates.push({
+      instanceId,
+      plateIndex: plateMatch ? Number.parseInt(plateMatch[1], 10) : manifestPlates.length + 1,
+      fileName: plateFileName
+    });
+  }
+
+  const metadata = {
+    parserVersion: 2,
+    site: "local-import",
+    pageType: "imported-3mf",
+    sourceUrl: pathToFileURL(filePath).href,
+    capturedAt: importedAt,
+    folderName: projectDirectory.name,
+    model: {
+      id: "",
+      modelId: "",
+      title,
+      slug: "",
+      summaryHtml: descriptionHtml,
+      summaryText,
+      coverUrl: "",
+      coverLandscapeUrl: "",
+      coverPortraitUrl: "",
+      license: decodeHtmlEntities(modelMetadata.License || "").trim(),
+      createdAt: modelMetadata.CreationDate || importedAt,
+      updatedAt: modelMetadata.ModificationDate || importedAt,
+      tags: [],
+      pictures: manifestPictures.map((picture) => ({
+        name: picture.fileName,
+        url: picture.source,
+        isRealLifePhoto: 0
+      }))
+    },
+    creator: {
+      uid: decodeHtmlEntities(modelMetadata.DesignerUserId || "").trim(),
+      name: designerName,
+      handle: "",
+      avatar: "",
+      fanCount: 0,
+      followCount: 0,
+      level: 0,
+      certificated: false
+    },
+    instances: [
+      {
+        id: instanceId,
+        profileId: instanceId,
+        title: instanceTitle,
+        summary: "",
+        coverUrl: "",
+        createdAt: modelMetadata.CreationDate || importedAt,
+        updatedAt: modelMetadata.ModificationDate || importedAt,
+        publishTime: modelMetadata.CreationDate || importedAt,
+        downloadCount: 0,
+        printCount: 0,
+        ratingCount: 0,
+        ratingScoreTotal: 0,
+        score: 0,
+        hasZipStl: false,
+        appCanPrint: true,
+        materialCount: filaments.length,
+        materialColorCount: filaments.filter((item) => item.color).length,
+        needAms: filaments.length > 1,
+        predictionSeconds: null,
+        weightGrams: null,
+        compatibility: compatibilityPayload.compatibility,
+        compatibilityText: compatibilityPayload.compatibilityText,
+        otherCompatibility: compatibilityPayload.otherCompatibility,
+        filaments,
+        pictures: [],
+        plates: manifestPlates.map((plate) => ({
+          index: plate.plateIndex,
+          name: plate.fileName
+        }))
+      }
+    ],
+    downloadHints: {},
+    commentsPreview: []
+  };
+
+  const manifest = {
+    savedAt: importedAt,
+    folderName: projectDirectory.name,
+    modelId: "",
+    title,
+    assets: {
+      cover: coverFileName,
+      pictures: manifestPictures,
+      instancePictures: [],
+      plates: manifestPlates,
+      modelFiles: [
+        {
+          instanceId,
+          type: "3mf",
+          fileName: path.basename(filePath),
+          source: pathToFileURL(filePath).href
+        }
+      ],
+      modelFilesMissing: []
+    }
+  };
+
+  await fs.writeFile(path.join(projectDirectory.path, "metadata.json"), JSON.stringify(metadata, null, 2), "utf8");
+  await fs.writeFile(
+    path.join(projectDirectory.path, "save-manifest.json"),
+    JSON.stringify(manifest, null, 2),
+    "utf8"
+  );
+
+  return {
+    projectPath: projectDirectory.path,
+    title,
+    author: designerName,
+    filePath
+  };
+}
+
+async function import3mfProjects(rootPath, targetDirectory, filePaths) {
+  const imported = [];
+  const failed = [];
+
+  for (const filePath of filePaths) {
+    try {
+      imported.push(await importSingle3mfProject(rootPath, targetDirectory, filePath));
+    } catch (error) {
+      failed.push({
+        filePath,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  return { imported, failed };
+}
+
+async function openContainingFolder(targetPath) {
+  if (!targetPath) {
+    return { ok: false, error: "缺少路径。" };
+  }
+
+  const resolvedPath = path.resolve(targetPath);
+
+  try {
+    const stats = await fs.stat(resolvedPath);
+    if (stats.isDirectory()) {
+      const errorMessage = await shell.openPath(resolvedPath);
+      return errorMessage ? { ok: false, error: errorMessage } : { ok: true };
+    }
+
+    shell.showItemInFolder(resolvedPath);
+    return { ok: true };
+  } catch {
+    return { ok: false, error: "目标路径不存在。" };
+  }
+}
+
+function isTransientDeleteError(error) {
+  if (!error) {
+    return false;
+  }
+
+  const errorCode = String(error.code || "").toUpperCase();
+  const errorMessage = String(error.message || "").toLowerCase();
+  return (
+    errorCode === "EBUSY" ||
+    errorCode === "EPERM" ||
+    errorCode === "ENOTEMPTY" ||
+    errorMessage.includes("resource busy") ||
+    errorMessage.includes("locked")
+  );
+}
+
+function wait(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function removeDirectorySafely(targetPath) {
+  try {
+    await shell.trashItem(targetPath);
+    return;
+  } catch (error) {
+    if (!isTransientDeleteError(error)) {
+      throw error;
+    }
+  }
+
+  let lastError = null;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      await fs.rm(targetPath, { recursive: true, force: false });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!isTransientDeleteError(error) || attempt === 4) {
+        throw error;
+      }
+
+      await wait(300 * (attempt + 1));
+    }
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+}
+
+ipcMain.handle("dialog:pick-directory", async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ["openDirectory", "createDirectory"]
+  });
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return { ok: false, canceled: true };
+  }
+
+  return { ok: true, path: result.filePaths[0] };
+});
+
+ipcMain.handle("shell:open-path", async (_event, targetPath) => {
+  if (!targetPath) {
+    return { ok: false, error: "缺少路径。" };
+  }
+
+  const errorMessage = await shell.openPath(targetPath);
+  if (errorMessage) {
+    return { ok: false, error: errorMessage };
+  }
+
+  return { ok: true };
+});
+
+ipcMain.handle("shell:open-external", async (_event, url) => {
+  if (!url) {
+    return { ok: false, error: "缺少链接。" };
+  }
+
+  await shell.openExternal(url);
+  return { ok: true };
+});
+
+ipcMain.handle("instance:show-context-menu", async (event, targetPath) => {
+  if (!targetPath) {
+    return { ok: false, error: "缺少路径。" };
+  }
+
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) {
+    return { ok: false, error: "无法打开菜单。" };
+  }
+
+  const menu = Menu.buildFromTemplate([
+    {
+      label: "打开所在文件夹",
+      click: () => {
+        void openContainingFolder(targetPath);
+      }
+    }
+  ]);
+
+  menu.popup({ window: win });
+  return { ok: true };
+});
 
 ipcMain.handle("library:scan-root", async (_event, rootPath) => {
   if (!rootPath) {
@@ -799,14 +1323,49 @@ ipcMain.handle("library:refresh-project", async (_event, rootPath, projectPath) 
   }
 });
 
-function sanitizeFolderName(value) {
-  return String(value || "")
-    .trim()
-    .replace(/[<>:"/\\|?*\u0000-\u001F]+/g, "-")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "");
-}
+ipcMain.handle("library:import-3mf", async (_event, rootPath, targetDirectory) => {
+  if (!rootPath || !targetDirectory) {
+    return { ok: false, error: "缺少导入参数。" };
+  }
+
+  if (!isPathInside(rootPath, targetDirectory)) {
+    return { ok: false, error: "导入目标目录不在当前根目录中。" };
+  }
+
+  if (!(await exists(targetDirectory))) {
+    return { ok: false, error: "导入目标目录不存在。" };
+  }
+
+  const fileDialogResult = await dialog.showOpenDialog({
+    properties: ["openFile", "multiSelections"],
+    filters: [
+      {
+        name: "3MF 文件",
+        extensions: ["3mf"]
+      }
+    ]
+  });
+
+  if (fileDialogResult.canceled || fileDialogResult.filePaths.length === 0) {
+    return { ok: false, canceled: true };
+  }
+
+  try {
+    const result = await import3mfProjects(rootPath, targetDirectory, fileDialogResult.filePaths);
+    return {
+      ok: result.imported.length > 0,
+      canceled: false,
+      imported: result.imported,
+      failed: result.failed,
+      targetDirectory
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+});
 
 ipcMain.handle("library:create-repo", async (_event, rootPath, repoName) => {
   try {
@@ -821,6 +1380,7 @@ ipcMain.handle("library:create-repo", async (_event, rootPath, repoName) => {
     }
 
     await fs.mkdir(repoPath, { recursive: true });
+    await ensureRepoMarker(repoPath, safeName);
     return { ok: true, path: repoPath, name: safeName };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -846,6 +1406,7 @@ ipcMain.handle("library:rename-repo", async (_event, rootPath, repoName, nextRep
     }
 
     await fs.rename(fromPath, toPath);
+    await ensureRepoMarker(toPath, toName);
     return { ok: true, path: toPath, name: toName };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -900,3 +1461,30 @@ ipcMain.handle("library:move-project", async (_event, projectPath, targetRepoPat
   }
 });
 
+ipcMain.handle("library:delete-project", async (_event, rootPath, projectPath) => {
+  try {
+    if (!rootPath || !projectPath) {
+      return { ok: false, error: "缺少删除参数。" };
+    }
+
+    if (!isPathInside(rootPath, projectPath)) {
+      return { ok: false, error: "项目不在当前根目录中。" };
+    }
+
+    if (!(await exists(projectPath))) {
+      return { ok: false, error: "项目目录不存在。" };
+    }
+
+    await removeDirectorySafely(projectPath);
+    return { ok: true };
+  } catch (error) {
+    if (isTransientDeleteError(error)) {
+      return {
+        ok: false,
+        error: "项目目录正在被系统占用，通常是资源管理器缩略图缓存锁住了文件。请关闭该目录相关的资源管理器窗口后再试一次。"
+      };
+    }
+
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});

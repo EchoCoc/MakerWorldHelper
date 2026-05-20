@@ -177,6 +177,40 @@ h1 {
   margin-bottom: 14px;
 }
 
+.panelHeaderActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.sortControl {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.sortControl select {
+  min-height: 38px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 253, 248, 0.98);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.sortControl select:focus {
+  outline: none;
+  border-color: rgba(182, 81, 0, 0.38);
+  box-shadow: 0 0 0 4px rgba(182, 81, 0, 0.08);
+}
+
 .repoList {
   display: grid;
   gap: 12px;
@@ -249,6 +283,7 @@ h1 {
   padding: 0;
   overflow: hidden;
   box-shadow: none;
+  position: relative;
 }
 
 .repoPinned {
@@ -264,6 +299,10 @@ h1 {
   background: transparent;
   padding: 14px;
   cursor: pointer;
+}
+
+.repoSelectWithMenu {
+  padding-right: 58px;
 }
 
 .repoTop {
@@ -291,6 +330,79 @@ h1 {
 .repoName {
   font-weight: 700;
   line-height: 1.4;
+}
+
+.repoMeta {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.repoMenu {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 3;
+}
+
+.repoMenuButton {
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(234, 216, 192, 0.92);
+  border-radius: 999px;
+  background: rgba(255, 252, 246, 0.95);
+  color: var(--accent-strong);
+  cursor: pointer;
+  box-shadow: 0 10px 24px rgba(69, 43, 17, 0.08);
+}
+
+.repoMenuButton:hover {
+  border-color: rgba(182, 81, 0, 0.28);
+  background: rgba(255, 247, 236, 0.98);
+}
+
+.repoMenuIcon {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+
+.repoMenuDropdown {
+  position: fixed;
+  min-width: 148px;
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(255, 253, 248, 0.98);
+  box-shadow: 0 18px 34px rgba(69, 43, 17, 0.16);
+  z-index: 50;
+}
+
+.repoMenuItem {
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  padding: 10px 12px;
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.repoMenuItem:hover:not(:disabled) {
+  background: rgba(182, 81, 0, 0.08);
+}
+
+.repoMenuItem:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.repoMenuItemDanger {
+  color: #a0391c;
 }
 
 .repoBadge,
@@ -1215,6 +1327,18 @@ h1 {
 .dangerButton {
   color: #a0391c;
   border-color: rgba(160, 57, 28, 0.2);
+  background: rgba(255, 247, 244, 0.96);
+}
+
+.dangerButton:hover:not(:disabled) {
+  border-color: rgba(160, 57, 28, 0.34);
+  background: rgba(255, 239, 233, 0.98);
+}
+
+.dangerButton:disabled {
+  opacity: 0.62;
+  cursor: not-allowed;
+  background: rgba(248, 243, 238, 0.96);
 }
 
 .ghostButton {
@@ -1229,6 +1353,95 @@ h1 {
   border-radius: 16px;
   text-align: center;
   color: var(--muted);
+}
+
+.appModalOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(46, 36, 24, 0.28);
+  backdrop-filter: blur(4px);
+}
+
+.appModalCard {
+  width: min(520px, 100%);
+  display: grid;
+  gap: 18px;
+  padding: 24px;
+  border: 1px solid rgba(95, 65, 35, 0.14);
+  border-radius: 20px;
+  background: rgba(255, 253, 248, 0.98);
+  box-shadow: 0 24px 60px rgba(69, 43, 17, 0.2);
+}
+
+.appModalHeader h3 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.appModalBody {
+  display: grid;
+  gap: 14px;
+}
+
+.appModalText {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.appModalInput {
+  width: 100%;
+  min-height: 48px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fffdfa;
+  color: var(--text);
+  font: inherit;
+}
+
+.appModalInput:focus {
+  outline: none;
+  border-color: rgba(182, 81, 0, 0.4);
+  box-shadow: 0 0 0 4px rgba(182, 81, 0, 0.08);
+}
+
+.appModalActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.appChoiceList {
+  display: grid;
+  gap: 10px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.appChoiceItem {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #fffdfa;
+  padding: 12px 14px;
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+  transition:
+    border-color 0.18s ease,
+    background-color 0.18s ease,
+    transform 0.18s ease;
+}
+
+.appChoiceItem:hover,
+.appChoiceItem.active {
+  border-color: rgba(182, 81, 0, 0.32);
+  background: rgba(255, 245, 232, 0.98);
 }
 
 @media (max-width: 1280px) {

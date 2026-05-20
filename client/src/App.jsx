@@ -4,6 +4,41 @@ import { LibraryPage } from "./pages/LibraryPage";
 
 const ROOT_PATH_STORAGE_KEY = "mw-helper.desktop.root-path";
 const PROJECTS_PER_PAGE = 24;
+const DEFAULT_SORT_KEY = "updated-desc";
+
+function normalizeSortText(value) {
+  return String(value || "").trim().toLocaleLowerCase("zh-CN");
+}
+
+function getProjectSortTimestamp(project, fieldName) {
+  const rawValue = project?.[fieldName];
+  const parsedValue = rawValue ? Date.parse(rawValue) : Number.NaN;
+  return Number.isFinite(parsedValue) ? parsedValue : 0;
+}
+
+function sortProjects(projects, sortKey) {
+  const nextProjects = [...projects];
+
+  nextProjects.sort((left, right) => {
+    switch (sortKey) {
+      case "updated-asc":
+        return getProjectSortTimestamp(left, "updatedAt") - getProjectSortTimestamp(right, "updatedAt");
+      case "title-asc":
+        return normalizeSortText(left.title).localeCompare(normalizeSortText(right.title), "zh-CN");
+      case "title-desc":
+        return normalizeSortText(right.title).localeCompare(normalizeSortText(left.title), "zh-CN");
+      case "author-asc":
+        return normalizeSortText(left.author).localeCompare(normalizeSortText(right.author), "zh-CN");
+      case "author-desc":
+        return normalizeSortText(right.author).localeCompare(normalizeSortText(left.author), "zh-CN");
+      case "updated-desc":
+      default:
+        return getProjectSortTimestamp(right, "updatedAt") - getProjectSortTimestamp(left, "updatedAt");
+    }
+  });
+
+  return nextProjects;
+}
 
 function readCachedRootPath() {
   try {
@@ -63,33 +98,6 @@ function upsertProject(projects, previousProjectPath, nextProject) {
   return [nextProject, ...nextProjects];
 }
 
-function pickTargetRepo(project, repositories) {
-  const targets = repositories.filter(
-    (repo) => repo.kind !== "overview" && repo.id !== project.repoId
-  );
-
-  if (targets.length === 0) {
-    return null;
-  }
-
-  if (targets.length === 1) {
-    return targets[0];
-  }
-
-  const optionsText = targets.map((repo, index) => `${index + 1}. ${repo.name}`).join("\n");
-  const answer = window.prompt(`请选择目标仓库：\n${optionsText}`, "1");
-  if (!answer) {
-    return undefined;
-  }
-
-  const numericIndex = Number.parseInt(answer, 10);
-  if (Number.isInteger(numericIndex) && numericIndex >= 1 && numericIndex <= targets.length) {
-    return targets[numericIndex - 1];
-  }
-
-  return targets.find((repo) => repo.name.toLowerCase() === answer.trim().toLowerCase()) || null;
-}
-
 function applyLibrarySnapshot({
   repositories,
   projects,
@@ -116,6 +124,134 @@ function applyLibrarySnapshot({
   };
 }
 
+function ModalShell({ title, children, actions, onClose }) {
+  useEffect(() => {
+    function handleEscape(event) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [onClose]);
+
+  return (
+    <div className="appModalOverlay" onMouseDown={onClose}>
+      <div className="appModalCard" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="appModalHeader">
+          <h3>{title}</h3>
+        </div>
+        <div className="appModalBody">{children}</div>
+        <div className="appModalActions">{actions}</div>
+      </div>
+    </div>
+  );
+}
+
+function TextInputDialog({ dialog, onCancel, onConfirm }) {
+  const [value, setValue] = useState(dialog.initialValue || "");
+
+  return (
+    <ModalShell
+      title={dialog.title}
+      onClose={onCancel}
+      actions={
+        <>
+          <button className="secondaryButton" type="button" onClick={onCancel}>
+            取消
+          </button>
+          <button
+            className="primaryButton"
+            type="button"
+            onClick={() => onConfirm(value)}
+            disabled={!value.trim()}
+          >
+            {dialog.confirmLabel || "确定"}
+          </button>
+        </>
+      }
+    >
+      {dialog.message ? <p className="appModalText">{dialog.message}</p> : null}
+      <input
+        className="appModalInput"
+        autoFocus
+        value={value}
+        placeholder={dialog.placeholder || ""}
+        onChange={(event) => setValue(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && value.trim()) {
+            onConfirm(value);
+          }
+        }}
+      />
+    </ModalShell>
+  );
+}
+
+function ConfirmDialog({ dialog, onCancel, onConfirm }) {
+  return (
+    <ModalShell
+      title={dialog.title}
+      onClose={onCancel}
+      actions={
+        <>
+          <button className="secondaryButton" type="button" onClick={onCancel}>
+            取消
+          </button>
+          <button className="primaryButton" type="button" onClick={onConfirm}>
+            {dialog.confirmLabel || "确定"}
+          </button>
+        </>
+      }
+    >
+      <p className="appModalText">{dialog.message}</p>
+    </ModalShell>
+  );
+}
+
+function ChoiceDialog({ dialog, onCancel, onConfirm }) {
+  const [selectedId, setSelectedId] = useState(dialog.options[0]?.id || "");
+
+  return (
+    <ModalShell
+      title={dialog.title}
+      onClose={onCancel}
+      actions={
+        <>
+          <button className="secondaryButton" type="button" onClick={onCancel}>
+            取消
+          </button>
+          <button
+            className="primaryButton"
+            type="button"
+            onClick={() => onConfirm(selectedId)}
+            disabled={!selectedId}
+          >
+            {dialog.confirmLabel || "确定"}
+          </button>
+        </>
+      }
+    >
+      {dialog.message ? <p className="appModalText">{dialog.message}</p> : null}
+      <div className="appChoiceList">
+        {dialog.options.map((option) => (
+          <button
+            key={option.id}
+            className={`appChoiceItem ${selectedId === option.id ? "active" : ""}`}
+            type="button"
+            onClick={() => setSelectedId(option.id)}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+    </ModalShell>
+  );
+}
+
 export default function App() {
   const hasDesktopApi =
     typeof window !== "undefined" &&
@@ -127,10 +263,14 @@ export default function App() {
   const [selectedRepoId, setSelectedRepoId] = useState("all");
   const [selectedProjectId, setSelectedProjectId] = useState(null);
   const [searchText, setSearchText] = useState("");
+  const [sortKey, setSortKey] = useState(DEFAULT_SORT_KEY);
   const [currentPage, setCurrentPage] = useState(1);
   const [status, setStatus] = useState(() =>
     hasDesktopApi ? "等待选择根目录。" : "当前为浏览器模式，请使用桌面端打开本地资源库。"
   );
+  const [textDialog, setTextDialog] = useState(null);
+  const [confirmDialog, setConfirmDialog] = useState(null);
+  const [choiceDialog, setChoiceDialog] = useState(null);
   const deferredSearchText = useDeferredValue(searchText);
 
   const filteredProjects = useMemo(() => {
@@ -140,17 +280,17 @@ export default function App() {
         ? allProjects
         : allProjects.filter((project) => project.repoId === selectedRepoId);
 
-    if (!keyword) {
-      return repoFiltered;
-    }
+    const keywordFiltered = !keyword
+      ? repoFiltered
+      : repoFiltered.filter((project) =>
+          [project.title, project.author, project.modelId, ...(project.tags || [])]
+            .join(" ")
+            .toLowerCase()
+            .includes(keyword)
+        );
 
-    return repoFiltered.filter((project) =>
-      [project.title, project.author, project.modelId, ...(project.tags || [])]
-        .join(" ")
-        .toLowerCase()
-        .includes(keyword)
-    );
-  }, [allProjects, deferredSearchText, selectedRepoId]);
+    return sortProjects(keywordFiltered, sortKey);
+  }, [allProjects, deferredSearchText, selectedRepoId, sortKey]);
 
   const totalPages = Math.max(1, Math.ceil(filteredProjects.length / PROJECTS_PER_PAGE));
   const pageProjects = useMemo(() => {
@@ -165,7 +305,7 @@ export default function App() {
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [selectedRepoId, searchText]);
+  }, [selectedRepoId, searchText, sortKey]);
 
   useEffect(() => {
     if (currentPage > totalPages) {
@@ -200,9 +340,7 @@ export default function App() {
           setSelectedProjectId,
           setCurrentPage
         });
-        setStatus(
-          `已从缓存恢复 ${cacheResult.data.projects?.length || 0} 个项目，正在后台刷新…`
-        );
+        setStatus(`已从缓存恢复 ${cacheResult.data.projects?.length || 0} 个项目，正在后台刷新…`);
       } else if (!cancelled) {
         setStatus("正在扫描本地项目…");
       }
@@ -244,6 +382,61 @@ export default function App() {
     };
   }, [hasDesktopApi]);
 
+  function requestTextDialog(dialog) {
+    return new Promise((resolve) => {
+      setTextDialog({
+        ...dialog,
+        resolve
+      });
+    });
+  }
+
+  function requestConfirmDialog(dialog) {
+    return new Promise((resolve) => {
+      setConfirmDialog({
+        ...dialog,
+        resolve
+      });
+    });
+  }
+
+  function requestChoiceDialog(dialog) {
+    return new Promise((resolve) => {
+      setChoiceDialog({
+        ...dialog,
+        resolve
+      });
+    });
+  }
+
+  async function pickTargetRepo(project) {
+    const targets = repositories.filter((repo) => repo.kind !== "overview" && repo.id !== project.repoId);
+
+    if (targets.length === 0) {
+      return null;
+    }
+
+    if (targets.length === 1) {
+      return targets[0];
+    }
+
+    const selectedRepoIdValue = await requestChoiceDialog({
+      title: "选择目标仓库",
+      message: `请选择 “${project.title}” 要移动到哪个仓库。`,
+      confirmLabel: "移动到这里",
+      options: targets.map((repo) => ({
+        id: repo.id,
+        label: repo.name
+      }))
+    });
+
+    if (!selectedRepoIdValue) {
+      return undefined;
+    }
+
+    return targets.find((repo) => repo.id === selectedRepoIdValue) || null;
+  }
+
   async function refreshRoot(
     targetRootPath,
     nextRepoId = selectedRepoId,
@@ -262,7 +455,8 @@ export default function App() {
 
     const nextRepositories = scanResult.data.repositories || [];
     const nextProjects = scanResult.data.projects || [];
-    const { repoExists, projectExists } = applyLibrarySnapshot({
+
+    applyLibrarySnapshot({
       repositories: nextRepositories,
       projects: nextProjects,
       nextRepoId,
@@ -278,8 +472,6 @@ export default function App() {
 
     return {
       ok: true,
-      repoExists,
-      projectExists,
       projectCount: nextProjects.length,
       repositories: nextRepositories,
       projects: nextProjects
@@ -304,13 +496,45 @@ export default function App() {
     await refreshRoot(result.path, "all");
   }
 
+  async function handleImport3mf() {
+    if (!rootPath) {
+      setStatus("请先选择根目录。");
+      return;
+    }
+
+    const selectedRepo = repositories.find((repo) => repo.id === selectedRepoId) || null;
+    const targetDirectory = selectedRepo && selectedRepo.kind !== "overview" ? selectedRepo.path : rootPath;
+
+    setStatus("正在导入 3MF 文件…");
+    const result = await window.desktopAPI?.import3mf?.(rootPath, targetDirectory);
+
+    if (!result?.ok) {
+      if (result?.canceled) {
+        setStatus("已取消导入 3MF 文件。");
+        return;
+      }
+
+      setStatus(result?.error || "导入 3MF 文件失败。");
+      return;
+    }
+
+    const importedCount = result.imported?.length || 0;
+    const failedCount = result.failed?.length || 0;
+    const statusText =
+      failedCount > 0
+        ? `已导入 ${importedCount} 个项目，失败 ${failedCount} 个。`
+        : `已导入 ${importedCount} 个项目。`;
+
+    await refreshRoot(rootPath, selectedRepoId, null, statusText);
+  }
+
   async function handleRefreshProject(project) {
     if (!rootPath || !project) {
       setStatus("当前没有可刷新的项目。");
       return;
     }
 
-    setStatus(`正在刷新项目“${project.title}”…`);
+    setStatus(`正在刷新项目 “${project.title}”…`);
     const result = await window.desktopAPI?.refreshProject?.(rootPath, project.projectPath);
 
     if (!result?.ok) {
@@ -330,7 +554,7 @@ export default function App() {
         syncRepositoryCounts(currentRepositories, nextProjectsSnapshot || allProjects)
       );
       setSelectedProjectId((currentProjectId) => (currentProjectId === project.id ? null : currentProjectId));
-      setStatus(`项目“${project.title}”已不存在，已从列表移除。`);
+      setStatus(`项目 “${project.title}” 已不存在，已从列表移除。`);
       return;
     }
 
@@ -344,158 +568,258 @@ export default function App() {
     );
     setSelectedRepoId(result.project.repoId || selectedRepoId);
     setSelectedProjectId(result.project.id);
-    setStatus(`项目“${result.project.title}”已刷新。`);
+    setStatus(`项目 “${result.project.title}” 已刷新。`);
+  }
+
+  async function handleDeleteProject(project) {
+    if (!rootPath || !project) {
+      setStatus("当前没有可删除的项目。");
+      return;
+    }
+
+    const confirmed = await requestConfirmDialog({
+      title: "删除项目",
+      message: `确认删除项目 “${project.title}” 吗？此操作会删除本地项目目录及其中的文件。`,
+      confirmLabel: "确认删除"
+    });
+    if (!confirmed) {
+      setStatus("已取消删除项目。");
+      return;
+    }
+
+    const result = await window.desktopAPI?.deleteProject?.(rootPath, project.projectPath);
+    if (!result?.ok) {
+      setStatus(result?.error || "删除项目失败。");
+      return;
+    }
+
+    let nextProjectsSnapshot = null;
+    setAllProjects((currentProjects) => {
+      nextProjectsSnapshot = currentProjects.filter(
+        (currentProject) => currentProject.projectPath !== project.projectPath
+      );
+      return nextProjectsSnapshot;
+    });
+    setRepositories((currentRepositories) =>
+      syncRepositoryCounts(currentRepositories, nextProjectsSnapshot || allProjects)
+    );
+    setSelectedProjectId((currentProjectId) => (currentProjectId === project.id ? null : currentProjectId));
+    setStatus(`项目 “${project.title}” 已删除。`);
   }
 
   return (
-    <Routes>
-      <Route
-        path="/"
-        element={
-          <LibraryPage
-            repositories={repositories}
-            projects={pageProjects}
-            totalProjectCount={filteredProjects.length}
-            currentPage={currentPage}
-            totalPages={totalPages}
-            selectedRepoId={selectedRepoId}
-            selectedProject={selectedProject}
-            rootPath={rootPath}
-            searchText={searchText}
-            status={status}
-            canPickRoot={hasDesktopApi}
-            onPickRoot={handlePickRoot}
-            onRefresh={async () => {
-              if (!rootPath) {
-                setStatus("请先选择根目录。");
-                return;
-              }
+    <>
+      <Routes>
+        <Route
+          path="/"
+          element={
+            <LibraryPage
+              repositories={repositories}
+              projects={pageProjects}
+              totalProjectCount={filteredProjects.length}
+              currentPage={currentPage}
+              totalPages={totalPages}
+              selectedRepoId={selectedRepoId}
+              selectedProject={selectedProject}
+              rootPath={rootPath}
+              searchText={searchText}
+              sortKey={sortKey}
+              status={status}
+              canPickRoot={hasDesktopApi}
+              onPickRoot={handlePickRoot}
+              onImport3mf={handleImport3mf}
+              onRefresh={async () => {
+                if (!rootPath) {
+                  setStatus("请先选择根目录。");
+                  return;
+                }
 
-              setStatus("正在重新扫描全部项目…");
-              await refreshRoot(rootPath, selectedRepoId);
-            }}
-            onRefreshProject={handleRefreshProject}
-            onRepoChange={(repoId) => {
-              setSelectedRepoId(repoId);
-              setSelectedProjectId(null);
-            }}
-            onProjectChange={setSelectedProjectId}
-            onPageChange={setCurrentPage}
-            onSearchChange={setSearchText}
-            onOpenExternal={async (url) => {
-              if (!url) {
-                return;
-              }
+                setStatus("正在重新扫描全部项目…");
+                await refreshRoot(rootPath, selectedRepoId);
+              }}
+              onRefreshProject={handleRefreshProject}
+              onRepoChange={(repoId) => {
+                setSelectedRepoId(repoId);
+                setSelectedProjectId(null);
+              }}
+              onProjectChange={setSelectedProjectId}
+              onPageChange={setCurrentPage}
+              onSearchChange={setSearchText}
+              onSortChange={setSortKey}
+              onOpenExternal={async (url) => {
+                if (!url) {
+                  return;
+                }
 
-              await window.desktopAPI?.openExternal?.(url);
-            }}
-            onOpenPath={async (targetPath) => {
-              if (!targetPath) {
-                return;
-              }
+                await window.desktopAPI?.openExternal?.(url);
+              }}
+              onOpenPath={async (targetPath) => {
+                if (!targetPath) {
+                  return;
+                }
 
-              const result = await window.desktopAPI?.openPath?.(targetPath);
-              if (!result?.ok) {
-                setStatus(result?.error || "打开路径失败。");
-              }
-            }}
-            onCreateRepo={async () => {
-              if (!rootPath) {
-                setStatus("请先选择根目录。");
-                return;
-              }
+                const result = await window.desktopAPI?.openPath?.(targetPath);
+                if (!result?.ok) {
+                  setStatus(result?.error || "打开路径失败。");
+                }
+              }}
+              onCreateRepo={async () => {
+                if (!rootPath) {
+                  setStatus("请先选择根目录。");
+                  return;
+                }
 
-              const repoName = window.prompt("请输入新仓库名称。");
-              if (!repoName) {
-                setStatus("已取消创建仓库。");
-                return;
-              }
+                const repoName = await requestTextDialog({
+                  title: "创建仓库",
+                  message: "请输入新仓库名称。",
+                  placeholder: "例如：动漫手办",
+                  confirmLabel: "创建"
+                });
+                if (!repoName?.trim()) {
+                  setStatus("已取消创建仓库。");
+                  return;
+                }
 
-              const result = await window.desktopAPI?.createRepo?.(rootPath, repoName);
-              if (!result?.ok) {
-                setStatus(result?.error || "创建仓库失败。");
-                return;
-              }
+                const result = await window.desktopAPI?.createRepo?.(rootPath, repoName.trim());
+                if (!result?.ok) {
+                  setStatus(result?.error || "创建仓库失败。");
+                  return;
+                }
 
-              setStatus(`仓库 ${result.name} 已创建。`);
-              await refreshRoot(rootPath, result.name);
-            }}
-            onRenameRepo={async (repo) => {
-              if (!rootPath || !repo || repo.kind !== "custom") {
-                return;
-              }
+                setStatus(`仓库 ${result.name} 已创建。`);
+                await refreshRoot(rootPath, result.name);
+              }}
+              onRenameRepo={async (repo) => {
+                if (!rootPath || !repo || repo.kind !== "custom") {
+                  return;
+                }
 
-              const nextName = window.prompt("请输入新的仓库名称。", repo.name);
-              if (!nextName) {
-                setStatus("已取消重命名仓库。");
-                return;
-              }
+                const nextName = await requestTextDialog({
+                  title: "重命名仓库",
+                  message: `请输入 “${repo.name}” 的新名称。`,
+                  initialValue: repo.name,
+                  confirmLabel: "保存"
+                });
+                if (!nextName?.trim()) {
+                  setStatus("已取消重命名仓库。");
+                  return;
+                }
 
-              const result = await window.desktopAPI?.renameRepo?.(rootPath, repo.name, nextName);
-              if (!result?.ok) {
-                setStatus(result?.error || "重命名仓库失败。");
-                return;
-              }
+                const result = await window.desktopAPI?.renameRepo?.(rootPath, repo.name, nextName.trim());
+                if (!result?.ok) {
+                  setStatus(result?.error || "重命名仓库失败。");
+                  return;
+                }
 
-              setStatus(`仓库已重命名为 ${result.name}。`);
-              await refreshRoot(rootPath, result.name);
-            }}
-            onDeleteRepo={async (repo) => {
-              if (!rootPath || !repo || repo.kind !== "custom") {
-                return;
-              }
+                setStatus(`仓库已重命名为 ${result.name}。`);
+                await refreshRoot(rootPath, result.name);
+              }}
+              onDeleteRepo={async (repo) => {
+                if (!rootPath || !repo || repo.kind !== "custom") {
+                  return;
+                }
 
-              const confirmed = window.confirm(`确认删除空仓库“${repo.name}”吗？`);
-              if (!confirmed) {
-                setStatus("已取消删除仓库。");
-                return;
-              }
+                const confirmed = await requestConfirmDialog({
+                  title: "删除仓库",
+                  message: `确认删除空仓库 “${repo.name}” 吗？`,
+                  confirmLabel: "确认删除"
+                });
+                if (!confirmed) {
+                  setStatus("已取消删除仓库。");
+                  return;
+                }
 
-              const result = await window.desktopAPI?.deleteRepo?.(rootPath, repo.name);
-              if (!result?.ok) {
-                setStatus(result?.error || "删除仓库失败。");
-                return;
-              }
+                const result = await window.desktopAPI?.deleteRepo?.(rootPath, repo.name);
+                if (!result?.ok) {
+                  setStatus(result?.error || "删除仓库失败。");
+                  return;
+                }
 
-              setStatus(`仓库 ${repo.name} 已删除。`);
-              await refreshRoot(rootPath, "all");
-            }}
-            onMoveProject={async (project) => {
-              if (!project) {
-                return;
-              }
+                setStatus(`仓库 ${repo.name} 已删除。`);
+                await refreshRoot(rootPath, "all");
+              }}
+              onMoveProject={async (project) => {
+                if (!project) {
+                  return;
+                }
 
-              const targetRepo = pickTargetRepo(project, repositories);
-              if (targetRepo === undefined) {
-                setStatus("已取消移动项目。");
-                return;
-              }
+                const targetRepo = await pickTargetRepo(project);
+                if (targetRepo === undefined) {
+                  setStatus("已取消移动项目。");
+                  return;
+                }
 
-              if (!targetRepo) {
-                setStatus("没有可用的目标仓库。");
-                return;
-              }
+                if (!targetRepo) {
+                  setStatus("没有可用的目标仓库。");
+                  return;
+                }
 
-              const confirmed = window.confirm(
-                `确认将“${project.title}”移动到“${targetRepo.name}”吗？`
-              );
-              if (!confirmed) {
-                setStatus("已取消移动项目。");
-                return;
-              }
+                const confirmed = await requestConfirmDialog({
+                  title: "移动项目",
+                  message: `确认将 “${project.title}” 移动到 “${targetRepo.name}” 吗？`,
+                  confirmLabel: "确认移动"
+                });
+                if (!confirmed) {
+                  setStatus("已取消移动项目。");
+                  return;
+                }
 
-              const result = await window.desktopAPI?.moveProject?.(project.projectPath, targetRepo.path);
-              if (!result?.ok) {
-                setStatus(result?.error || "移动项目失败。");
-                return;
-              }
+                const result = await window.desktopAPI?.moveProject?.(project.projectPath, targetRepo.path);
+                if (!result?.ok) {
+                  setStatus(result?.error || "移动项目失败。");
+                  return;
+                }
 
-              setStatus(`项目已移动到 ${targetRepo.name}。`);
-              await refreshRoot(rootPath, targetRepo.id);
-            }}
-          />
-        }
-      />
-    </Routes>
+                setStatus(`项目已移动到 ${targetRepo.name}。`);
+                await refreshRoot(rootPath, targetRepo.id);
+              }}
+              onDeleteProject={handleDeleteProject}
+            />
+          }
+        />
+      </Routes>
+
+      {textDialog ? (
+        <TextInputDialog
+          dialog={textDialog}
+          onCancel={() => {
+            textDialog.resolve("");
+            setTextDialog(null);
+          }}
+          onConfirm={(value) => {
+            textDialog.resolve(value);
+            setTextDialog(null);
+          }}
+        />
+      ) : null}
+
+      {confirmDialog ? (
+        <ConfirmDialog
+          dialog={confirmDialog}
+          onCancel={() => {
+            confirmDialog.resolve(false);
+            setConfirmDialog(null);
+          }}
+          onConfirm={() => {
+            confirmDialog.resolve(true);
+            setConfirmDialog(null);
+          }}
+        />
+      ) : null}
+
+      {choiceDialog ? (
+        <ChoiceDialog
+          dialog={choiceDialog}
+          onCancel={() => {
+            choiceDialog.resolve("");
+            setChoiceDialog(null);
+          }}
+          onConfirm={(value) => {
+            choiceDialog.resolve(value);
+            setChoiceDialog(null);
+          }}
+        />
+      ) : null}
+    </>
   );
 }

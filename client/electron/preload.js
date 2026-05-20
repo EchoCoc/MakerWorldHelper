@@ -9,10 +9,14 @@ contextBridge.exposeInMainWorld("desktopAPI", {
   scanRoot: (rootPath) => ipcRenderer.invoke("library:scan-root", rootPath),
   refreshProject: (rootPath, projectPath) =>
     ipcRenderer.invoke("library:refresh-project", rootPath, projectPath),
+  import3mf: (rootPath, targetDirectory) =>
+    ipcRenderer.invoke("library:import-3mf", rootPath, targetDirectory),
   createRepo: (rootPath, repoName) => ipcRenderer.invoke("library:create-repo", rootPath, repoName),
   renameRepo: (rootPath, repoName, nextRepoName) =>
     ipcRenderer.invoke("library:rename-repo", rootPath, repoName, nextRepoName),
   deleteRepo: (rootPath, repoName) => ipcRenderer.invoke("library:delete-repo", rootPath, repoName),
+  deleteProject: (rootPath, projectPath) =>
+    ipcRenderer.invoke("library:delete-project", rootPath, projectPath),
   moveProject: (projectPath, targetRepoPath) =>
     ipcRenderer.invoke("library:move-project", projectPath, targetRepoPath)
 });
