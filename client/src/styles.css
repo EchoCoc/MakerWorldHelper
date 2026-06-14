@@ -1146,6 +1146,25 @@ h1 {
   color: #216e39;
 }
 
+.projectStatusBadges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.printCompleteBadge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(182, 81, 0, 0.12);
+  color: #8e3d00;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .platePreviewPopover {
   position: absolute;
   top: calc(100% + 10px);

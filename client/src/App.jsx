@@ -27,6 +27,10 @@ function sortProjects(projects, sortKey) {
 
   nextProjects.sort((left, right) => {
     switch (sortKey) {
+      case "added-desc":
+        return getProjectSortTimestamp(right, "addedAt") - getProjectSortTimestamp(left, "addedAt");
+      case "added-asc":
+        return getProjectSortTimestamp(left, "addedAt") - getProjectSortTimestamp(right, "addedAt");
       case "updated-asc":
         return getProjectSortTimestamp(left, "updatedAt") - getProjectSortTimestamp(right, "updatedAt");
       case "title-asc":
@@ -110,8 +114,11 @@ function normalizeQueueEntry(entry) {
     return null;
   }
 
+  const stage = normalizeQueueStage(entry.stage);
+
   return {
-    stage: normalizeQueueStage(entry.stage),
+    stage,
+    printCompleted: stage === "assembly" || entry.printCompleted === true,
     markedAt:
       typeof entry.markedAt === "string" && entry.markedAt.trim() ? entry.markedAt : new Date().toISOString()
   };
@@ -380,7 +387,8 @@ export default function App() {
           ...project,
           queueEntry,
           queueStage: queueEntry?.stage || null,
-          queueStageLabel: queueEntry ? getQueueStageLabel(queueEntry.stage) : ""
+          queueStageLabel: queueEntry ? getQueueStageLabel(queueEntry.stage) : "",
+          printCompleted: queueEntry?.printCompleted === true
         };
       }),
     [allProjects, queueEntries]
@@ -482,6 +490,7 @@ export default function App() {
 
         if (
           normalizedEntry.stage !== entry?.stage ||
+          normalizedEntry.printCompleted !== (entry?.printCompleted === true) ||
           normalizedEntry.markedAt !== entry?.markedAt
         ) {
           changed = true;
@@ -645,8 +654,10 @@ export default function App() {
       return;
     }
 
+    const nextStage = normalizeQueueStage(selectedStage);
     const nextEntry = {
-      stage: normalizeQueueStage(selectedStage),
+      stage: nextStage,
+      printCompleted: nextStage === "assembly",
       markedAt: currentEntry?.markedAt || new Date().toISOString()
     };
 
@@ -655,6 +666,51 @@ export default function App() {
       [queueKey]: nextEntry
     }));
     setStatus(`项目 “${project.title}” 已标记为${getQueueStageLabel(nextEntry.stage)}。`);
+  }
+
+  function handleMarkPrintCompleted(project) {
+    if (!project) {
+      return;
+    }
+
+    const queueKey = getProjectQueueKey(project);
+    const currentEntry = normalizeQueueEntry(queueEntries[queueKey]);
+    if (!currentEntry || currentEntry.printCompleted) {
+      return;
+    }
+
+    updateQueueEntries((currentEntries) => ({
+      ...currentEntries,
+      [queueKey]: {
+        ...currentEntry,
+        printCompleted: true
+      }
+    }));
+    setStatus(`项目 “${project.title}” 已标记为已打印完成。`);
+  }
+
+  function handleMarkPrintIncomplete(project) {
+    if (!project) {
+      return;
+    }
+
+    const queueKey = getProjectQueueKey(project);
+    const currentEntry = normalizeQueueEntry(queueEntries[queueKey]);
+    if (!currentEntry || !currentEntry.printCompleted) {
+      return;
+    }
+
+    const nextEntry = {
+      ...currentEntry,
+      stage: currentEntry.stage === "assembly" ? "printing" : currentEntry.stage,
+      printCompleted: false
+    };
+
+    updateQueueEntries((currentEntries) => ({
+      ...currentEntries,
+      [queueKey]: nextEntry
+    }));
+    setStatus(`项目 “${project.title}” 已标记为未打印完成。`);
   }
 
   function handleRemoveQueuedProject(project) {
@@ -926,6 +982,8 @@ export default function App() {
               onRefreshProject={handleRefreshProject}
               onEditProjectTags={handleEditProjectTags}
               onQueueProject={handleQueueProject}
+              onMarkPrintCompleted={handleMarkPrintCompleted}
+              onMarkPrintIncomplete={handleMarkPrintIncomplete}
               onRemoveQueuedProject={handleRemoveQueuedProject}
               onRepoChange={(repoId) => {
                 setSelectedRepoId(repoId);

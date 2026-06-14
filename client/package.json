@@ -1,6 +1,6 @@
 {
   "name": "makerworld-helper-cn-client",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "description": "Desktop client for browsing and managing local MakerWorld projects.",
   "main": "electron/main.js",

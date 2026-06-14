@@ -124,10 +124,118 @@ h2 {
   background: #fff4e5;
 }
 
+.secondary.active {
+  border-color: rgba(187, 77, 0, 0.36);
+  background: rgba(187, 77, 0, 0.1);
+  color: var(--accent-strong);
+}
+
 .status {
   margin-top: 10px;
   color: var(--muted);
   font-size: 13px;
+}
+
+.optionToggle {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-bottom: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.optionToggle input {
+  margin-top: 2px;
+}
+
+.instanceSelection {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.instanceSelection.disabled {
+  opacity: 0.7;
+}
+
+.instanceSelectionHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.instanceSelectionHeader h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.instanceSelectionActions {
+  display: flex;
+  gap: 10px;
+}
+
+.textButton {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.textButton:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.instanceList {
+  display: grid;
+  gap: 8px;
+  max-height: 220px;
+  margin-top: 10px;
+  overflow: auto;
+}
+
+.instanceList.empty {
+  padding: 12px;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.instanceItem {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.instanceItem input {
+  margin-top: 3px;
+}
+
+.instanceInfo {
+  min-width: 0;
+}
+
+.instanceTitle {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.instanceMeta {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .summary {

@@ -61,6 +61,8 @@ function ProjectCard({
   onMoveProject,
   onEditProjectTags,
   onQueueProject,
+  onMarkPrintCompleted,
+  onMarkPrintIncomplete,
   onRemoveQueuedProject,
   onDeleteProject,
   onAuthorSearch,
@@ -162,6 +164,21 @@ function ProjectCard({
                   className="projectMenuItem"
                   onClick={() => {
                     setMenuOpen(false);
+                    if (project.printCompleted) {
+                      onMarkPrintIncomplete(project);
+                    } else {
+                      onMarkPrintCompleted(project);
+                    }
+                  }}
+                >
+                  {project.printCompleted ? "标记未打印完成" : "标记打印完成"}
+                </button>
+              ) : null}
+              {project.queueEntry ? (
+                <button
+                  className="projectMenuItem"
+                  onClick={() => {
+                    setMenuOpen(false);
                     onRemoveQueuedProject(project);
                   }}
                 >
@@ -191,9 +208,12 @@ function ProjectCard({
             <button className="projectAuthorButton" onClick={() => onAuthorSearch(project.author)}>
               {project.author}
             </button>
-            {project.queueEntry ? (
-              <span className={`queueStageBadge ${project.queueStage}`}>{project.queueStageLabel}</span>
-            ) : null}
+            <div className="projectStatusBadges">
+              {project.queueEntry ? (
+                <span className={`queueStageBadge ${project.queueStage}`}>{project.queueStageLabel}</span>
+              ) : null}
+              {project.printCompleted ? <span className="printCompleteBadge">已打印完成</span> : null}
+            </div>
           </div>
         </div>
         <div className="projectChipRow">
@@ -247,6 +267,8 @@ function ProjectListView({
   onMoveProject,
   onEditProjectTags,
   onQueueProject,
+  onMarkPrintCompleted,
+  onMarkPrintIncomplete,
   onRemoveQueuedProject,
   onDeleteProject,
   onAuthorSearch,
@@ -273,6 +295,8 @@ function ProjectListView({
           <label className="sortControl">
             <span>排序</span>
             <select value={sortKey} onChange={(event) => onSortChange(event.target.value)}>
+              <option value="added-desc">最近添加</option>
+              <option value="added-asc">最早添加</option>
               <option value="updated-desc">最近更新</option>
               <option value="updated-asc">最早更新</option>
               <option value="title-asc">标题 A-Z</option>
@@ -298,6 +322,8 @@ function ProjectListView({
               onMoveProject={onMoveProject}
               onEditProjectTags={onEditProjectTags}
               onQueueProject={onQueueProject}
+              onMarkPrintCompleted={onMarkPrintCompleted}
+              onMarkPrintIncomplete={onMarkPrintIncomplete}
               onRemoveQueuedProject={onRemoveQueuedProject}
               onDeleteProject={onDeleteProject}
               onAuthorSearch={onAuthorSearch}
@@ -574,6 +600,8 @@ function ProjectDetailView({
   onMoveProject,
   onEditProjectTags,
   onQueueProject,
+  onMarkPrintCompleted,
+  onMarkPrintIncomplete,
   onRemoveQueuedProject,
   onRefreshProject,
   onDeleteProject
@@ -740,6 +768,22 @@ function ProjectDetailView({
                   type="button"
                   onClick={() => {
                     setMenuOpen(false);
+                    if (selectedProject.printCompleted) {
+                      onMarkPrintIncomplete(selectedProject);
+                    } else {
+                      onMarkPrintCompleted(selectedProject);
+                    }
+                  }}
+                >
+                  {selectedProject.printCompleted ? "标记未打印完成" : "标记打印完成"}
+                </button>
+              ) : null}
+              {selectedProject.queueEntry ? (
+                <button
+                  className="detailMenuItem"
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
                     onRemoveQueuedProject(selectedProject);
                   }}
                 >
@@ -765,11 +809,14 @@ function ProjectDetailView({
         <h2>{selectedProject.title}</h2>
         <div className="detailHeadlineMeta">
           <p className="subtle">{selectedProject.author}</p>
-          {selectedProject.queueEntry ? (
-            <span className={`queueStageBadge ${selectedProject.queueStage}`}>
-              {selectedProject.queueStageLabel}
-            </span>
-          ) : null}
+          <div className="projectStatusBadges">
+            {selectedProject.queueEntry ? (
+              <span className={`queueStageBadge ${selectedProject.queueStage}`}>
+                {selectedProject.queueStageLabel}
+              </span>
+            ) : null}
+            {selectedProject.printCompleted ? <span className="printCompleteBadge">已打印完成</span> : null}
+          </div>
         </div>
       </div>
 
@@ -1005,6 +1052,8 @@ export function LibraryPage({
   onMoveProject,
   onEditProjectTags,
   onQueueProject,
+  onMarkPrintCompleted,
+  onMarkPrintIncomplete,
   onRemoveQueuedProject,
   onRefreshProject,
   onDeleteProject
@@ -1112,6 +1161,8 @@ export function LibraryPage({
               onMoveProject={onMoveProject}
               onEditProjectTags={onEditProjectTags}
               onQueueProject={onQueueProject}
+              onMarkPrintCompleted={onMarkPrintCompleted}
+              onMarkPrintIncomplete={onMarkPrintIncomplete}
               onRemoveQueuedProject={onRemoveQueuedProject}
               onRefreshProject={onRefreshProject}
               onDeleteProject={onDeleteProject}
@@ -1130,6 +1181,8 @@ export function LibraryPage({
               onMoveProject={onMoveProject}
               onEditProjectTags={onEditProjectTags}
               onQueueProject={onQueueProject}
+              onMarkPrintCompleted={onMarkPrintCompleted}
+              onMarkPrintIncomplete={onMarkPrintIncomplete}
               onRemoveQueuedProject={onRemoveQueuedProject}
               onDeleteProject={onDeleteProject}
               onAuthorSearch={onSearchChange}

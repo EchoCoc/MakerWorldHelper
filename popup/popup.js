@@ -1,7 +1,16 @@
-const openLibraryButton = document.getElementById("openLibraryButton");
 const pickDirectoryButton = document.getElementById("pickDirectoryButton");
+const setDefaultDirectoryButton = document.getElementById("setDefaultDirectoryButton");
+const restoreDefaultDirectoryButton = document.getElementById("restoreDefaultDirectoryButton");
+const clearDefaultDirectoryButton = document.getElementById("clearDefaultDirectoryButton");
 const extractButton = document.getElementById("extractButton");
+const quickSaveButton = document.getElementById("quickSaveButton");
 const saveButton = document.getElementById("saveButton");
+const metadataOnlyCheckbox = document.getElementById("metadataOnlyCheckbox");
+const instanceSelectionSection = document.getElementById("instanceSelectionSection");
+const instanceSelectionSummaryNode = document.getElementById("instanceSelectionSummary");
+const instanceSelectionListNode = document.getElementById("instanceSelectionList");
+const selectAllInstancesButton = document.getElementById("selectAllInstancesButton");
+const clearAllInstancesButton = document.getElementById("clearAllInstancesButton");
 const statusNode = document.getElementById("status");
 const summaryNode = document.getElementById("summary");
 const directorySummaryNode = document.getElementById("directorySummary");
@@ -10,15 +19,197 @@ const savedResourcesCard = document.getElementById("savedResourcesCard");
 const savedResourcesSummaryNode = document.getElementById("savedResourcesSummary");
 const savedResourcesOutputNode = document.getElementById("savedResourcesOutput");
 
+const DEFAULT_DIRECTORY_DB_NAME = "mw-helper-popup";
+const DEFAULT_DIRECTORY_STORE_NAME = "settings";
+const DEFAULT_DIRECTORY_KEY = "default-save-directory";
+const INVALID_COMPATIBILITY_CODES = new Set(["O1D", "O1S", "N1"]);
+
 let currentRecord = null;
 let directoryHandle = null;
+let defaultDirectoryHandle = null;
+let defaultDirectoryName = "";
+let activeDirectoryIsDefault = false;
+let isBusy = false;
+let selectedInstanceIds = new Set();
+let selectionScopeKey = "";
 
 function setStatus(message) {
-  statusNode.textContent = message;
+  statusNode.textContent = String(message || "");
 }
 
-function setDirectorySummary(label) {
-  directorySummaryNode.innerHTML = `<dt>保存目录</dt><dd>${label}</dd>`;
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function renderDirectorySummary() {
+  const activeLabel = directoryHandle
+    ? `${directoryHandle.name}${activeDirectoryIsDefault ? "（默认）" : ""}`
+    : "本次会话未选择";
+  const defaultLabel = defaultDirectoryName || "未设置";
+
+  directorySummaryNode.innerHTML = [
+    `<dt>保存目录</dt><dd>${escapeHtml(activeLabel)}</dd>`,
+    `<dt>默认目录</dt><dd>${escapeHtml(defaultLabel)}</dd>`
+  ].join("");
+}
+
+function updateDirectoryActionButtons() {
+  pickDirectoryButton.disabled = isBusy;
+  setDefaultDirectoryButton.disabled = isBusy || !directoryHandle || activeDirectoryIsDefault;
+  restoreDefaultDirectoryButton.disabled = isBusy || !defaultDirectoryHandle || activeDirectoryIsDefault;
+  clearDefaultDirectoryButton.disabled = isBusy || !defaultDirectoryHandle;
+  extractButton.disabled = isBusy;
+  quickSaveButton.disabled = isBusy;
+  saveButton.disabled = isBusy || !currentRecord;
+  metadataOnlyCheckbox.disabled = isBusy || !currentRecord;
+  selectAllInstancesButton.disabled = isBusy || !currentRecord || metadataOnlyCheckbox.checked;
+  clearAllInstancesButton.disabled = isBusy || !currentRecord || metadataOnlyCheckbox.checked;
+
+  setDefaultDirectoryButton.textContent = activeDirectoryIsDefault ? "已设为默认目录" : "设为默认目录";
+  restoreDefaultDirectoryButton.textContent = activeDirectoryIsDefault
+    ? "当前正在使用默认目录"
+    : "恢复默认目录";
+  clearDefaultDirectoryButton.textContent = defaultDirectoryHandle ? "清除默认目录" : "未设置默认目录";
+
+  setDefaultDirectoryButton.classList.toggle("active", activeDirectoryIsDefault);
+  restoreDefaultDirectoryButton.classList.toggle("active", activeDirectoryIsDefault);
+  instanceSelectionSection.classList.toggle("disabled", metadataOnlyCheckbox.checked);
+}
+
+function setBusyState(nextBusy) {
+  isBusy = Boolean(nextBusy);
+  updateDirectoryActionButtons();
+}
+
+function setActiveDirectory(handle, { isDefault = false } = {}) {
+  directoryHandle = handle;
+  activeDirectoryIsDefault = Boolean(handle && isDefault);
+  renderDirectorySummary();
+  updateDirectoryActionButtons();
+}
+
+function clearDefaultDirectoryState() {
+  defaultDirectoryHandle = null;
+  defaultDirectoryName = "";
+  activeDirectoryIsDefault = false;
+  renderDirectorySummary();
+  updateDirectoryActionButtons();
+}
+
+function openSettingsDatabase() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DEFAULT_DIRECTORY_DB_NAME, 1);
+
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains(DEFAULT_DIRECTORY_STORE_NAME)) {
+        database.createObjectStore(DEFAULT_DIRECTORY_STORE_NAME);
+      }
+    };
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("打开默认目录存储失败。"));
+  });
+}
+
+async function readStoredDefaultDirectory() {
+  const database = await openSettingsDatabase();
+
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(DEFAULT_DIRECTORY_STORE_NAME, "readonly");
+    const store = transaction.objectStore(DEFAULT_DIRECTORY_STORE_NAME);
+    const request = store.get(DEFAULT_DIRECTORY_KEY);
+
+    request.onsuccess = () => {
+      database.close();
+      resolve(request.result || null);
+    };
+    request.onerror = () => {
+      database.close();
+      reject(request.error || new Error("读取默认目录失败。"));
+    };
+  });
+}
+
+async function writeStoredDefaultDirectory(handle) {
+  const database = await openSettingsDatabase();
+
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(DEFAULT_DIRECTORY_STORE_NAME, "readwrite");
+    const store = transaction.objectStore(DEFAULT_DIRECTORY_STORE_NAME);
+    const request = store.put(handle, DEFAULT_DIRECTORY_KEY);
+
+    request.onsuccess = () => {
+      database.close();
+      resolve();
+    };
+    request.onerror = () => {
+      database.close();
+      reject(request.error || new Error("保存默认目录失败。"));
+    };
+  });
+}
+
+async function clearStoredDefaultDirectory() {
+  const database = await openSettingsDatabase();
+
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(DEFAULT_DIRECTORY_STORE_NAME, "readwrite");
+    const store = transaction.objectStore(DEFAULT_DIRECTORY_STORE_NAME);
+    const request = store.delete(DEFAULT_DIRECTORY_KEY);
+
+    request.onsuccess = () => {
+      database.close();
+      resolve();
+    };
+    request.onerror = () => {
+      database.close();
+      reject(request.error || new Error("清除默认目录失败。"));
+    };
+  });
+}
+
+async function loadDefaultDirectoryState() {
+  const storedHandle = await readStoredDefaultDirectory();
+  if (!storedHandle) {
+    clearDefaultDirectoryState();
+    return false;
+  }
+
+  defaultDirectoryHandle = storedHandle;
+  defaultDirectoryName = storedHandle.name || "已保存目录";
+  renderDirectorySummary();
+  updateDirectoryActionButtons();
+  return true;
+}
+
+async function restoreDefaultDirectory({ requestAccess = false } = {}) {
+  if (!defaultDirectoryHandle) {
+    const loaded = await loadDefaultDirectoryState();
+    if (!loaded || !defaultDirectoryHandle) {
+      throw new Error("当前还没有设置默认目录。");
+    }
+  }
+
+  const options = { mode: "readwrite" };
+  const permissionState = await defaultDirectoryHandle.queryPermission(options);
+  let granted = permissionState === "granted";
+
+  if (!granted && requestAccess) {
+    granted = (await defaultDirectoryHandle.requestPermission(options)) === "granted";
+  }
+
+  if (!granted) {
+    throw new Error("默认目录尚未授权，请点击“恢复默认目录”重新授权。");
+  }
+
+  setActiveDirectory(defaultDirectoryHandle, { isDefault: true });
+  return defaultDirectoryHandle;
 }
 
 function sanitizeName(value) {
@@ -29,8 +220,6 @@ function sanitizeName(value) {
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
 }
-
-const INVALID_COMPATIBILITY_CODES = new Set(["O1D", "O1S", "N1"]);
 
 function normalizeCompatibilityName(value) {
   const text = String(value || "").trim();
@@ -218,8 +407,103 @@ function renderSummary(record) {
     .join("");
 }
 
+function getSelectionScopeKey(record) {
+  return `${record?.model?.id ?? ""}|${record?.sourceUrl ?? ""}`;
+}
+
+function getInstanceSelectionId(instance) {
+  return String(instance?.id ?? getInstanceDirectoryName(instance));
+}
+
+function getCurrentSaveOptions() {
+  return {
+    metadataOnly: Boolean(metadataOnlyCheckbox?.checked),
+    selectedInstanceIds: new Set(selectedInstanceIds)
+  };
+}
+
+function syncSelectedInstanceIds(record, { preserveExisting = true } = {}) {
+  const nextScopeKey = getSelectionScopeKey(record);
+  const availableIds = (record?.instances || []).map((instance) => getInstanceSelectionId(instance));
+  const availableIdSet = new Set(availableIds);
+
+  if (!preserveExisting || nextScopeKey !== selectionScopeKey) {
+    selectedInstanceIds = new Set(availableIds);
+    selectionScopeKey = nextScopeKey;
+    return;
+  }
+
+  selectedInstanceIds = new Set(
+    [...selectedInstanceIds].filter((instanceId) => availableIdSet.has(instanceId))
+  );
+}
+
+function getSelectedInstanceCount(record) {
+  return (record?.instances || []).filter((instance) =>
+    selectedInstanceIds.has(getInstanceSelectionId(instance))
+  ).length;
+}
+
+function renderInstanceSelection() {
+  if (!currentRecord || !Array.isArray(currentRecord.instances) || currentRecord.instances.length === 0) {
+    instanceSelectionListNode.className = "instanceList empty";
+    instanceSelectionListNode.textContent = "尚未解析配置";
+    instanceSelectionSummaryNode.textContent = "解析后可按配置勾选需要下载的打印文件。";
+    return;
+  }
+
+  const metadataOnly = Boolean(metadataOnlyCheckbox.checked);
+  const selectedCount = getSelectedInstanceCount(currentRecord);
+  const totalCount = currentRecord.instances.length;
+
+  instanceSelectionSummaryNode.textContent = metadataOnly
+    ? `当前为仅描述模式，本次不会下载任何图片、文档和 3MF 文件。共保留 ${totalCount} 个配置的描述信息。`
+    : `当前将下载 ${selectedCount} / ${totalCount} 个配置的打印文件；未勾选的配置只保存描述和元数据。`;
+
+  instanceSelectionListNode.className = "instanceList";
+  instanceSelectionListNode.innerHTML = currentRecord.instances
+    .map((instance) => {
+      const selectionId = getInstanceSelectionId(instance);
+      const checked = selectedInstanceIds.has(selectionId) ? "checked" : "";
+      const compatibilityText = instance?.compatibilityText || "未识别机型";
+      const plateCount = Array.isArray(instance?.plates) ? instance.plates.length : 0;
+
+      return `
+        <label class="instanceItem">
+          <input type="checkbox" class="instanceCheckbox" data-instance-id="${escapeHtml(selectionId)}" ${checked}>
+          <div class="instanceInfo">
+            <div class="instanceTitle">${escapeHtml(instance?.title || `配置 ${selectionId}`)}</div>
+            <div class="instanceMeta">${escapeHtml(compatibilityText)} · ${plateCount} 个 plate</div>
+          </div>
+        </label>
+      `;
+    })
+    .join("");
+
+  for (const checkbox of instanceSelectionListNode.querySelectorAll(".instanceCheckbox")) {
+    checkbox.disabled = metadataOnly || isBusy;
+    checkbox.addEventListener("change", (event) => {
+      const instanceId = event.currentTarget?.dataset?.instanceId;
+      if (!instanceId) {
+        return;
+      }
+
+      if (event.currentTarget.checked) {
+        selectedInstanceIds.add(instanceId);
+      } else {
+        selectedInstanceIds.delete(instanceId);
+      }
+
+      renderInstanceSelection();
+      updateDirectoryActionButtons();
+    });
+  }
+}
+
 function createSavedResourceLines(record, folderName, assets) {
   const lines = [`${folderName}/`];
+  const selectedInstanceIds = new Set(assets?.selectedInstanceIds || []);
+  const metadataOnly = Boolean(assets?.metadataOnly);
 
   lines.push("  metadata.json");
   lines.push("  summary.txt");
@@ -227,8 +511,10 @@ function createSavedResourceLines(record, folderName, assets) {
   lines.push("  download-hints.json");
   lines.push("  comments-preview.json");
   lines.push("  save-manifest.json");
-  lines.push("  model/");
-  lines.push("    images/");
+  if (!metadataOnly) {
+    lines.push("  model/");
+    lines.push("    images/");
+  }
 
   if (assets?.cover) {
     lines.push(`      ${assets.cover}`);
@@ -264,6 +550,10 @@ function createSavedResourceLines(record, folderName, assets) {
       `instance-${instance.id || "x"}`;
     lines.push(`    ${instanceDirName}/`);
     lines.push("      instance.json");
+    if (metadataOnly || !selectedInstanceIds.has(getInstanceSelectionId(instance))) {
+      continue;
+    }
+
     lines.push("      plates/");
 
     for (const plate of assets?.plates?.filter((item) => item.instanceId === instance.id) || []) {
@@ -313,8 +603,17 @@ async function pickDirectory() {
     throw new Error("未获得目录写入权限。");
   }
 
-  directoryHandle = handle;
-  setDirectorySummary(handle.name || "已选择目录");
+  let isDefault = false;
+  if (defaultDirectoryHandle && typeof handle.isSameEntry === "function") {
+    try {
+      isDefault = await handle.isSameEntry(defaultDirectoryHandle);
+    } catch {
+      isDefault = false;
+    }
+  }
+
+  setActiveDirectory(handle, { isDefault });
+  return handle;
 }
 
 async function ensureDirectory(parentHandle, name) {
@@ -330,6 +629,19 @@ async function writeTextFile(parentHandle, name, content) {
 
 async function writeJsonFile(parentHandle, name, value) {
   await writeTextFile(parentHandle, name, JSON.stringify(value, null, 2));
+}
+
+async function readExistingFile(parentHandle, name) {
+  try {
+    const fileHandle = await parentHandle.getFileHandle(name, { create: false });
+    const file = await fileHandle.getFile();
+    return file;
+  } catch (error) {
+    if (error?.name === "NotFoundError") {
+      return null;
+    }
+    throw error;
+  }
 }
 
 async function fetchBlob(url) {
@@ -359,19 +671,132 @@ function getFileNameFromUrl(url, fallback) {
   }
 }
 
-async function downloadToFile(parentHandle, url, fallbackName) {
+function createTransferResult(fileName, { reused = false } = {}) {
+  return {
+    fileName,
+    reused
+  };
+}
+
+function recordTransferStats(saved, transferResult) {
+  if (!transferResult) {
+    return;
+  }
+
+  if (transferResult.reused) {
+    saved.reusedCount += 1;
+  } else {
+    saved.downloadedCount += 1;
+  }
+}
+
+async function downloadToFile(parentHandle, url, fallbackName, { preferExisting = false } = {}) {
   if (!url) {
     return null;
   }
 
-  const blob = await fetchBlob(url);
   const fileName = getFileNameFromUrl(url, fallbackName);
+  if (preferExisting) {
+    const existingFile = await readExistingFile(parentHandle, fileName);
+    if (existingFile && existingFile.size > 0) {
+      return createTransferResult(fileName, { reused: true });
+    }
+  }
+
+  const blob = await fetchBlob(url);
   await writeBlobFile(parentHandle, fileName, blob);
-  return fileName;
+  return createTransferResult(fileName);
 }
 
-async function saveAssets(rootHandle, record) {
+function getInstanceDirectoryName(instance) {
+  return (
+    sanitizeName(`${instance.id || "instance"}-${instance.title || "profile"}`) ||
+    `instance-${instance.id || "x"}`
+  );
+}
+
+async function findExistingModelFileName(instanceFilesDir) {
+  try {
+    for await (const entry of instanceFilesDir.values()) {
+      if (entry.kind !== "file" || !/\.3mf$/i.test(entry.name)) {
+        continue;
+      }
+
+      const file = await entry.getFile();
+      if (file.size > 0) {
+        return entry.name;
+      }
+    }
+    return null;
+  } catch (error) {
+    if (error?.name === "NotFoundError") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function shouldRefreshRecordDownloadsForProject(rootHandle, record, saveOptions = {}) {
+  if (saveOptions.metadataOnly) {
+    return false;
+  }
+
+  let instancesDir = null;
+
+  try {
+    instancesDir = await rootHandle.getDirectoryHandle("instances", { create: false });
+  } catch (error) {
+    if (error?.name !== "NotFoundError") {
+      throw error;
+    }
+  }
+
+  for (const instance of record?.instances || []) {
+    if (!saveOptions.selectedInstanceIds?.has(getInstanceSelectionId(instance))) {
+      continue;
+    }
+
+    if (!shouldExpectModelFile(instance)) {
+      continue;
+    }
+
+    let hasLocalModelFile = false;
+    if (instancesDir) {
+      try {
+        const instanceDir = await instancesDir.getDirectoryHandle(getInstanceDirectoryName(instance), {
+          create: false
+        });
+        const filesDir = await instanceDir.getDirectoryHandle("files", { create: false });
+        hasLocalModelFile = Boolean(await findExistingModelFileName(filesDir));
+      } catch (error) {
+        if (error?.name !== "NotFoundError") {
+          throw error;
+        }
+      }
+    }
+
+    if (hasLocalModelFile) {
+      continue;
+    }
+
+    const download = instance?.downloads?.f3mf;
+    if (!download?.ok || !download.url) {
+      return true;
+    }
+
+    const expiryTime = getSignedUrlExpiryTime(download.url);
+    if (expiryTime && expiryTime - Date.now() < 2 * 60 * 1000) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+async function saveAssets(rootHandle, record, saveOptions = {}) {
   const saved = {
+    metadataOnly: Boolean(saveOptions.metadataOnly),
+    selectedInstanceIds: [...(saveOptions.selectedInstanceIds || [])],
     cover: null,
     pictures: [],
     documents: [],
@@ -379,67 +804,88 @@ async function saveAssets(rootHandle, record) {
     plates: [],
     materialFiles: [],
     modelFiles: [],
-    modelFilesMissing: []
+    modelFilesMissing: [],
+    downloadedCount: 0,
+    reusedCount: 0
   };
 
-  const modelDir = await ensureDirectory(rootHandle, "model");
-  const imagesDir = await ensureDirectory(modelDir, "images");
-  const documentsDir = await ensureDirectory(modelDir, "documents");
-
-  if (record?.model?.coverUrl) {
-    saved.cover = await downloadToFile(imagesDir, record.model.coverUrl, "cover.jpg");
+  let imagesDir = null;
+  let documentsDir = null;
+  if (!saveOptions.metadataOnly) {
+    const modelDir = await ensureDirectory(rootHandle, "model");
+    imagesDir = await ensureDirectory(modelDir, "images");
+    documentsDir = await ensureDirectory(modelDir, "documents");
   }
 
-  for (let index = 0; index < (record?.model?.pictures || []).length; index += 1) {
-    const picture = record.model.pictures[index];
-    const fileName = await downloadToFile(
-      imagesDir,
-      picture.url,
-      `detail-${String(index + 1).padStart(2, "0")}.jpg`
-    );
-    saved.pictures.push({ source: picture.url, fileName });
+  if (!saveOptions.metadataOnly && record?.model?.coverUrl) {
+    const transfer = await downloadToFile(imagesDir, record.model.coverUrl, "cover.jpg", {
+      preferExisting: true
+    });
+    recordTransferStats(saved, transfer);
+    saved.cover = transfer?.fileName || null;
   }
 
-  for (let index = 0; index < (record?.model?.documents || []).length; index += 1) {
-    const documentItem = record.model.documents[index];
-    if (!documentItem?.url) {
-      continue;
-    }
-
-    const fallbackName =
-      sanitizeName(documentItem.title || `document-${String(index + 1).padStart(2, "0")}.pdf`) ||
-      `document-${String(index + 1).padStart(2, "0")}.pdf`;
-    try {
-      const fileName = await downloadToFile(documentsDir, documentItem.url, fallbackName);
-      saved.documents.push({
-        title: documentItem.title || fileName,
-        source: documentItem.url,
-        fileName
-      });
-    } catch (_error) {
-      // Ignore broken document links so the main project can still be saved.
+  if (!saveOptions.metadataOnly) {
+    for (let index = 0; index < (record?.model?.pictures || []).length; index += 1) {
+      const picture = record.model.pictures[index];
+      const transfer = await downloadToFile(
+        imagesDir,
+        picture.url,
+        `detail-${String(index + 1).padStart(2, "0")}.jpg`,
+        { preferExisting: true }
+      );
+      recordTransferStats(saved, transfer);
+      saved.pictures.push({ source: picture.url, fileName: transfer?.fileName || null });
     }
   }
 
-  if (record?.model?.materials?.download?.url) {
+  if (!saveOptions.metadataOnly) {
+    for (let index = 0; index < (record?.model?.documents || []).length; index += 1) {
+      const documentItem = record.model.documents[index];
+      if (!documentItem?.url) {
+        continue;
+      }
+
+      const fallbackName =
+        sanitizeName(documentItem.title || `document-${String(index + 1).padStart(2, "0")}.pdf`) ||
+        `document-${String(index + 1).padStart(2, "0")}.pdf`;
+      try {
+        const transfer = await downloadToFile(documentsDir, documentItem.url, fallbackName, {
+          preferExisting: true
+        });
+        recordTransferStats(saved, transfer);
+        saved.documents.push({
+          title: documentItem.title || transfer?.fileName,
+          source: documentItem.url,
+          fileName: transfer?.fileName || null
+        });
+      } catch {
+        // Ignore broken document links so the main project can still be saved.
+      }
+    }
+  }
+
+  if (!saveOptions.metadataOnly && record?.model?.materials?.download?.url) {
     try {
-      const materialFileName = await downloadToFile(
+      const transfer = await downloadToFile(
         documentsDir,
         record.model.materials.download.url,
-        sanitizeName(record.model.materials.download.title || "materials-list") || "materials-list"
+        sanitizeName(record.model.materials.download.title || "materials-list") || "materials-list",
+        { preferExisting: true }
       );
+      recordTransferStats(saved, transfer);
       saved.materialFiles.push({
-        title: record.model.materials.download.title || materialFileName,
+        title: record.model.materials.download.title || transfer?.fileName,
         source: record.model.materials.download.url,
-        fileName: materialFileName
+        fileName: transfer?.fileName || null
       });
-    } catch (_error) {
+    } catch {
       // Ignore broken material download links and keep the generated material list files.
     }
   }
 
   const materialGroups = Array.isArray(record?.model?.materials?.groups) ? record.model.materials.groups : [];
-  if (materialGroups.length > 0) {
+  if (!saveOptions.metadataOnly && materialGroups.length > 0) {
     const materialJsonName = "materials-list.json";
     const materialTextName = "materials-list.txt";
     const materialLines = [];
@@ -479,40 +925,63 @@ async function saveAssets(rootHandle, record) {
   const instancesDir = await ensureDirectory(rootHandle, "instances");
 
   for (const instance of record?.instances || []) {
-    const instanceDirName =
-      sanitizeName(`${instance.id || "instance"}-${instance.title || "profile"}`) ||
-      `instance-${instance.id || "x"}`;
+    const instanceDirName = getInstanceDirectoryName(instance);
     const instanceDir = await ensureDirectory(instancesDir, instanceDirName);
-    const plateDir = await ensureDirectory(instanceDir, "plates");
-    const fileDir = await ensureDirectory(instanceDir, "files");
+    const shouldDownloadFiles =
+      !saveOptions.metadataOnly && saveOptions.selectedInstanceIds?.has(getInstanceSelectionId(instance));
+    const plateDir = shouldDownloadFiles ? await ensureDirectory(instanceDir, "plates") : null;
+    const fileDir = shouldDownloadFiles ? await ensureDirectory(instanceDir, "files") : null;
 
     await writeTextFile(instanceDir, "instance.json", JSON.stringify(instance, null, 2));
 
-    if (instance.coverUrl) {
-      const fileName = await downloadToFile(instanceDir, instance.coverUrl, "instance-cover.jpg");
-      saved.instancePictures.push({ instanceId: instance.id, fileName });
+    if (shouldDownloadFiles && instance.coverUrl) {
+      const transfer = await downloadToFile(instanceDir, instance.coverUrl, "instance-cover.jpg", {
+        preferExisting: true
+      });
+      recordTransferStats(saved, transfer);
+      saved.instancePictures.push({ instanceId: instance.id, fileName: transfer?.fileName || null });
     }
 
-    for (const plate of instance.plates || []) {
-      const fileName = await downloadToFile(
-        plateDir,
-        plate.thumbnailUrl || plate.topPictureUrl || plate.pickPictureUrl,
-        `plate-${plate.index || "x"}.png`
-      );
-      saved.plates.push({ instanceId: instance.id, plateIndex: plate.index, fileName });
+    if (shouldDownloadFiles) {
+      for (const plate of instance.plates || []) {
+        const transfer = await downloadToFile(
+          plateDir,
+          plate.thumbnailUrl || plate.topPictureUrl || plate.pickPictureUrl,
+          `plate-${plate.index || "x"}.png`,
+          { preferExisting: true }
+        );
+        recordTransferStats(saved, transfer);
+        saved.plates.push({
+          instanceId: instance.id,
+          plateIndex: plate.index,
+          fileName: transfer?.fileName || null
+        });
+      }
+    }
+
+    if (!shouldDownloadFiles) {
+      continue;
     }
 
     if (instance.downloads?.f3mf?.ok && instance.downloads.f3mf.url) {
       try {
-        const fileName = await downloadToFile(
-          fileDir,
-          instance.downloads.f3mf.url,
-          instance.downloads.f3mf.name || `instance-${instance.id}.3mf`
-        );
+        let transfer = null;
+        const existingModelFileName = await findExistingModelFileName(fileDir);
+        if (existingModelFileName) {
+          transfer = createTransferResult(existingModelFileName, { reused: true });
+        } else {
+          transfer = await downloadToFile(
+            fileDir,
+            instance.downloads.f3mf.url,
+            instance.downloads.f3mf.name || `instance-${instance.id}.3mf`,
+            { preferExisting: true }
+          );
+        }
+        recordTransferStats(saved, transfer);
         saved.modelFiles.push({
           instanceId: instance.id,
           type: "f3mf",
-          fileName,
+          fileName: transfer?.fileName || null,
           source: instance.downloads.f3mf.url
         });
       } catch (error) {
@@ -559,6 +1028,77 @@ async function extractModel() {
   return response.data;
 }
 
+async function ensureDirectoryReady() {
+  if (directoryHandle) {
+    return directoryHandle;
+  }
+
+  if (defaultDirectoryHandle) {
+    setStatus("正在恢复默认目录...");
+    return restoreDefaultDirectory({ requestAccess: true });
+  }
+
+  throw new Error("请先选择保存目录，或先设置默认目录。");
+}
+
+async function runExtractFlow() {
+  const record = sanitizeModelRecord(await extractModel());
+  currentRecord = record;
+  syncSelectedInstanceIds(record, { preserveExisting: true });
+  renderSummary(record);
+  renderInstanceSelection();
+  jsonOutputNode.textContent = JSON.stringify(record, null, 2);
+  updateDirectoryActionButtons();
+
+  const captchaBlockedCount = (record.instances || []).filter((instance) =>
+    isCaptchaBlockedMessage(instance?.downloads?.f3mf?.error)
+  ).length;
+
+  setStatus(
+    captchaBlockedCount > 0
+      ? `解析成功，但有 ${captchaBlockedCount} 个配置的 3MF 被站点人机验证拦截。请先回到 MakerWorld 页面完成验证，再保存。`
+      : "解析成功，可以保存当前项目了。"
+  );
+
+  return record;
+}
+
+async function runSaveFlow() {
+  await ensureDirectoryReady();
+  const previewOptions = getCurrentSaveOptions();
+  setStatus(
+    previewOptions.metadataOnly
+      ? "正在只保存描述和元数据，不下载资源文件..."
+      : "正在写入本地目录，已存在资源将优先复用..."
+  );
+  const result = await saveRecord();
+  const summary = getMissingModelFileSummary(result.assets);
+  const downloadedSummary =
+    result.assets?.downloadedCount > 0 ? `，新下载 ${result.assets.downloadedCount} 个文件` : "";
+  const reusedSummary = result.assets?.reusedCount > 0 ? `，复用 ${result.assets.reusedCount} 个已有文件` : "";
+  const modeSummary = result.assets?.metadataOnly ? "，本次仅保存描述和元数据" : "";
+
+  setStatus(
+    summary.captchaBlockedCount > 0
+      ? `保存完成，目录名：${result.folderName}${modeSummary}${downloadedSummary}${reusedSummary}。其中 ${summary.captchaBlockedCount} 个配置的 3MF 被站点人机验证拦截，请回到 MakerWorld 页面完成验证后重新保存。`
+      : result.missingModelFileCount > 0
+        ? `保存完成，目录名：${result.folderName}${modeSummary}${downloadedSummary}${reusedSummary}。其中 ${result.missingModelFileCount} 个配置未保存到 3MF。`
+        : `保存完成，目录名：${result.folderName}${modeSummary}${downloadedSummary}${reusedSummary}`
+  );
+
+  const shouldShowResources = window.confirm(
+    "资源已保存完成。\n\n是否查看本次保存的资源结构？\n\n说明：浏览器扩展不能直接打开系统文件夹。"
+  );
+
+  if (shouldShowResources) {
+    showSavedResources(currentRecord, result.folderName, result.assets);
+  } else {
+    hideSavedResources();
+  }
+
+  return result;
+}
+
 async function saveRecord() {
   if (!directoryHandle) {
     throw new Error("请先选择保存目录。");
@@ -573,26 +1113,32 @@ async function saveRecord() {
     throw new Error("保存目录未授权写入。");
   }
 
-  setStatus("姝ｅ湪鍚屾褰撳墠椤甸潰鍐呭...");
+  setStatus("正在准备项目资源...");
   let sanitizedRecord = sanitizeModelRecord(await extractModel());
   currentRecord = sanitizedRecord;
+  syncSelectedInstanceIds(sanitizedRecord, { preserveExisting: true });
   renderSummary(sanitizedRecord);
+  renderInstanceSelection();
   jsonOutputNode.textContent = JSON.stringify(sanitizedRecord, null, 2);
-
-  if (shouldRefreshRecordDownloads(sanitizedRecord)) {
-    setStatus("正在刷新 3MF 下载链接...");
-    sanitizedRecord = sanitizeModelRecord(await extractModel());
-    currentRecord = sanitizedRecord;
-    renderSummary(sanitizedRecord);
-    jsonOutputNode.textContent = JSON.stringify(sanitizedRecord, null, 2);
-  }
+  const saveOptions = getCurrentSaveOptions();
 
   const rootFolderName =
     sanitizeName(sanitizedRecord.folderName) ||
     sanitizeName(sanitizedRecord.model?.title) ||
     `makerworld-${currentRecord.model?.id || "model"}`;
   const projectDir = await ensureDirectory(directoryHandle, rootFolderName);
-  const assets = await saveAssets(projectDir, sanitizedRecord);
+
+  if (await shouldRefreshRecordDownloadsForProject(projectDir, sanitizedRecord, saveOptions)) {
+    setStatus("正在刷新缺失 3MF 的下载链接...");
+    sanitizedRecord = sanitizeModelRecord(await extractModel());
+    currentRecord = sanitizedRecord;
+    syncSelectedInstanceIds(sanitizedRecord, { preserveExisting: true });
+    renderSummary(sanitizedRecord);
+    renderInstanceSelection();
+    jsonOutputNode.textContent = JSON.stringify(sanitizedRecord, null, 2);
+  }
+
+  const assets = await saveAssets(projectDir, sanitizedRecord, saveOptions);
 
   await writeTextFile(projectDir, "metadata.json", JSON.stringify(sanitizedRecord, null, 2));
   await writeTextFile(projectDir, "summary.txt", sanitizedRecord.model?.summaryText || "");
@@ -613,6 +1159,10 @@ async function saveRecord() {
     folderName: rootFolderName,
     modelId: sanitizedRecord.model?.id ?? null,
     title: sanitizedRecord.model?.title || "",
+    saveOptions: {
+      metadataOnly: saveOptions.metadataOnly,
+      selectedInstanceIds: [...saveOptions.selectedInstanceIds]
+    },
     assets
   };
 
@@ -624,12 +1174,29 @@ async function saveRecord() {
   };
 }
 
-openLibraryButton.addEventListener("click", () => {
-  const url = chrome.runtime.getURL("library/library.html");
-  chrome.tabs.create({ url });
+metadataOnlyCheckbox.addEventListener("change", () => {
+  renderInstanceSelection();
+  updateDirectoryActionButtons();
+});
+
+selectAllInstancesButton.addEventListener("click", () => {
+  if (!currentRecord) {
+    return;
+  }
+
+  selectedInstanceIds = new Set((currentRecord.instances || []).map((instance) => getInstanceSelectionId(instance)));
+  renderInstanceSelection();
+  updateDirectoryActionButtons();
+});
+
+clearAllInstancesButton.addEventListener("click", () => {
+  selectedInstanceIds = new Set();
+  renderInstanceSelection();
+  updateDirectoryActionButtons();
 });
 
 pickDirectoryButton.addEventListener("click", async () => {
+  setBusyState(true);
   try {
     setStatus("正在请求目录权限...");
     await pickDirectory();
@@ -637,64 +1204,121 @@ pickDirectoryButton.addEventListener("click", async () => {
     setStatus("保存目录已设置。");
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));
+  } finally {
+    setBusyState(false);
+  }
+});
+
+setDefaultDirectoryButton.addEventListener("click", async () => {
+  setBusyState(true);
+  try {
+    if (!directoryHandle) {
+      throw new Error("请先选择一个保存目录。");
+    }
+
+    await writeStoredDefaultDirectory(directoryHandle);
+    defaultDirectoryHandle = directoryHandle;
+    defaultDirectoryName = directoryHandle.name || "已保存目录";
+    activeDirectoryIsDefault = true;
+    renderDirectorySummary();
+    updateDirectoryActionButtons();
+    setStatus(`已将 ${defaultDirectoryName} 设为默认目录。`);
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error));
+  } finally {
+    setBusyState(false);
+  }
+});
+
+restoreDefaultDirectoryButton.addEventListener("click", async () => {
+  setBusyState(true);
+  try {
+    setStatus("正在恢复默认目录...");
+    await restoreDefaultDirectory({ requestAccess: true });
+    hideSavedResources();
+    setStatus(`已恢复默认目录：${defaultDirectoryName}。`);
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error));
+  } finally {
+    setBusyState(false);
+  }
+});
+
+clearDefaultDirectoryButton.addEventListener("click", async () => {
+  setBusyState(true);
+  try {
+    await clearStoredDefaultDirectory();
+    clearDefaultDirectoryState();
+    setStatus("已清除默认目录设置。");
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error));
+  } finally {
+    setBusyState(false);
   }
 });
 
 extractButton.addEventListener("click", async () => {
+  setBusyState(true);
   try {
-    const record = sanitizeModelRecord(await extractModel());
-    currentRecord = record;
-    renderSummary(record);
-    jsonOutputNode.textContent = JSON.stringify(record, null, 2);
-    saveButton.disabled = false;
-
-    const captchaBlockedCount = (record.instances || []).filter((instance) =>
-      isCaptchaBlockedMessage(instance?.downloads?.f3mf?.error)
-    ).length;
-
-    setStatus(
-      captchaBlockedCount > 0
-        ? `解析成功，但有 ${captchaBlockedCount} 个配置的 3MF 被站点人机验证拦截。请先回到 MakerWorld 页面完成验证，再保存。`
-        : "解析成功，可以保存当前项目了。"
-    );
+    await runExtractFlow();
   } catch (error) {
     currentRecord = null;
-    saveButton.disabled = true;
+    selectedInstanceIds = new Set();
+    selectionScopeKey = "";
+    renderInstanceSelection();
+    updateDirectoryActionButtons();
     jsonOutputNode.textContent = "解析失败";
     setStatus(error instanceof Error ? error.message : String(error));
+  } finally {
+    setBusyState(false);
+  }
+});
+
+quickSaveButton.addEventListener("click", async () => {
+  setBusyState(true);
+  try {
+    await ensureDirectoryReady();
+    await runExtractFlow();
+    await runSaveFlow();
+  } catch (error) {
+    if (!currentRecord) {
+      jsonOutputNode.textContent = "解析失败";
+    }
+    setStatus(error instanceof Error ? error.message : String(error));
+  } finally {
+    setBusyState(false);
   }
 });
 
 saveButton.addEventListener("click", async () => {
+  setBusyState(true);
   try {
-    saveButton.disabled = true;
-    setStatus("正在写入本地目录并下载图片与模型文件...");
-    const result = await saveRecord();
-    const summary = getMissingModelFileSummary(result.assets);
-
-    setStatus(
-      summary.captchaBlockedCount > 0
-        ? `保存完成，目录名：${result.folderName}。其中 ${summary.captchaBlockedCount} 个配置的 3MF 被站点人机验证拦截，请回到 MakerWorld 页面完成验证后重新保存。`
-        : result.missingModelFileCount > 0
-          ? `保存完成，目录名：${result.folderName}。其中 ${result.missingModelFileCount} 个配置未保存到 3MF。`
-        : `保存完成，目录名：${result.folderName}`
-    );
-
-    const shouldShowResources = window.confirm(
-      "资源已保存完成。\n\n是否查看本次保存的资源结构？\n\n说明：浏览器扩展不能直接打开系统文件夹。"
-    );
-
-    if (shouldShowResources) {
-      showSavedResources(currentRecord, result.folderName, result.assets);
-    } else {
-      hideSavedResources();
-    }
+    await runSaveFlow();
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));
   } finally {
-    saveButton.disabled = !currentRecord;
+    setBusyState(false);
   }
 });
 
-setDirectorySummary("本次会话未选择");
+renderDirectorySummary();
+updateDirectoryActionButtons();
+renderInstanceSelection();
 hideSavedResources();
+
+loadDefaultDirectoryState()
+  .then(async (hasDefault) => {
+    if (!hasDefault) {
+      return;
+    }
+
+    try {
+      await restoreDefaultDirectory({ requestAccess: false });
+      setStatus(`已自动恢复默认目录：${defaultDirectoryName}。`);
+    } catch {
+      setStatus(`已识别默认目录：${defaultDirectoryName}，点击“恢复默认目录”后可继续使用。`);
+    }
+  })
+  .catch(() => {
+    setStatus("默认目录初始化失败，请重新设置。");
+  });

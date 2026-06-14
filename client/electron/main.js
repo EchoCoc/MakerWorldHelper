@@ -714,6 +714,8 @@ async function readProject(projectPath, repo, cachedProject = null) {
     return null;
   }
 
+  const projectStats = await fs.stat(projectPath);
+  const addedAt = projectStats.birthtime?.toISOString?.() || projectStats.ctime?.toISOString?.() || "";
   const fingerprint = await getProjectFingerprint(projectPath);
   if (cachedProject?.cacheFingerprint === fingerprint) {
     return {
@@ -722,7 +724,8 @@ async function readProject(projectPath, repo, cachedProject = null) {
       repoId: repo.id,
       repoLabel: repo.name,
       repoKind: repo.kind === "default" ? "default" : "custom",
-      projectPath
+      projectPath,
+      addedAt
     };
   }
 
@@ -741,6 +744,7 @@ async function readProject(projectPath, repo, cachedProject = null) {
     repoLabel: repo.name,
     repoKind: repo.kind === "default" ? "default" : "custom",
     projectPath,
+    addedAt,
     title: metadata?.model?.title || path.basename(projectPath),
     author: metadata?.creator?.name || "未知作者",
     modelId: String(metadata?.model?.id ?? ""),

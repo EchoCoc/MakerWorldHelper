@@ -11,17 +11,41 @@
       <header class="hero">
         <p class="eyebrow">MakerWorld Helper CN</p>
         <h1>模型解析与保存</h1>
-        <p class="subtle">解析当前 MakerWorld 模型页，并把结构化信息、图片和模型文件保存到本地目录。</p>
+        <p class="subtle">解析当前 MakerWorld 模型页面，并将描述、图片、文档和打印文件按你的选择保存到本地目录。</p>
       </header>
 
       <section class="card">
         <div class="actions">
-          <button id="openLibraryButton" class="secondary">打开本地资源库</button>
           <button id="pickDirectoryButton" class="secondary">选择保存目录</button>
+          <button id="setDefaultDirectoryButton" class="secondary">设为默认目录</button>
+          <button id="restoreDefaultDirectoryButton" class="secondary">恢复默认目录</button>
+          <button id="clearDefaultDirectoryButton" class="secondary">清除默认目录</button>
           <button id="extractButton" class="primary">解析当前页面</button>
+          <button id="quickSaveButton" class="primary">一键解析并保存</button>
           <button id="saveButton" class="primary" disabled>保存当前项目</button>
         </div>
         <p id="status" class="status">等待操作</p>
+      </section>
+
+      <section class="card">
+        <h2>保存选项</h2>
+        <label class="optionToggle">
+          <input id="metadataOnlyCheckbox" type="checkbox">
+          <span>只保存描述和元数据，不下载图片、文档和 3MF 文件</span>
+        </label>
+        <p class="subtle">适合先建项目目录、只看描述，后面再按需补下载。</p>
+
+        <div id="instanceSelectionSection" class="instanceSelection">
+          <div class="instanceSelectionHeader">
+            <h3>配置文件选择</h3>
+            <div class="instanceSelectionActions">
+              <button id="selectAllInstancesButton" class="textButton" type="button">全选</button>
+              <button id="clearAllInstancesButton" class="textButton" type="button">清空</button>
+            </div>
+          </div>
+          <p id="instanceSelectionSummary" class="subtle">解析后可按配置勾选需要下载的打印文件。</p>
+          <div id="instanceSelectionList" class="instanceList empty">尚未解析配置</div>
+        </div>
       </section>
 
       <section class="card">
@@ -34,6 +58,8 @@
         <dl id="directorySummary" class="summary">
           <dt>保存目录</dt>
           <dd>本次会话未选择</dd>
+          <dt>默认目录</dt>
+          <dd>未设置</dd>
         </dl>
       </section>
 
