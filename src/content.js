@@ -1,4 +1,10 @@
 (function () {
+  if (window.__MWQS_CONTENT_SCRIPT_INITIALIZED__) {
+    return;
+  }
+
+  window.__MWQS_CONTENT_SCRIPT_INITIALIZED__ = true;
+
   const DESIGN_SERVICE_HEADERS = {
     "X-BBL-Client-Type": "web",
     "X-BBL-Client-Version": "00.00.00.01",
@@ -923,7 +929,178 @@
     };
   }
 
+  function ensureInlinePanel() {
+    if (window.__MWQS_INLINE_PANEL__) {
+      return window.__MWQS_INLINE_PANEL__;
+    }
+
+    const host = document.createElement("div");
+    host.id = "mwqs-inline-panel-host";
+    const shadowRoot = host.attachShadow({ mode: "open" });
+    const panelUrl = chrome.runtime.getURL("popup/popup.html?mode=inpage");
+
+    shadowRoot.innerHTML = `
+      <style>
+        :host {
+          all: initial;
+        }
+
+        .launcher {
+          position: fixed;
+          right: 20px;
+          bottom: 24px;
+          z-index: 2147483644;
+          border: 0;
+          border-radius: 999px;
+          padding: 12px 14px;
+          background: rgba(17, 17, 17, 0.88);
+          color: #fff;
+          font: 600 13px/1.2 "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+          box-shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
+          cursor: pointer;
+          backdrop-filter: blur(10px);
+        }
+
+        .launcher:hover {
+          background: rgba(17, 17, 17, 0.96);
+        }
+
+        .drawer {
+          position: fixed;
+          top: 0;
+          right: 0;
+          z-index: 2147483645;
+          width: min(460px, 92vw);
+          height: 100vh;
+          display: flex;
+          flex-direction: column;
+          background: rgba(245, 239, 228, 0.98);
+          box-shadow: -24px 0 48px rgba(26, 18, 8, 0.22);
+          transform: translateX(100%);
+          opacity: 0;
+          pointer-events: none;
+          transition: transform 180ms ease, opacity 180ms ease;
+          overflow: hidden;
+        }
+
+        .drawer.open {
+          transform: translateX(0);
+          opacity: 1;
+          pointer-events: auto;
+        }
+
+        .header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          padding: 14px 16px;
+          border-bottom: 1px solid rgba(109, 86, 56, 0.16);
+          background: linear-gradient(180deg, rgba(255, 250, 241, 0.98), rgba(248, 241, 229, 0.95));
+          color: #2b2319;
+          font: 600 13px/1.4 "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        }
+
+        .headerTitle {
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+        }
+
+        .headerTitle strong {
+          font-size: 14px;
+        }
+
+        .headerTitle span {
+          color: rgba(65, 52, 38, 0.72);
+          font-size: 12px;
+          font-weight: 500;
+        }
+
+        .closeButton {
+          border: 0;
+          border-radius: 999px;
+          width: 32px;
+          height: 32px;
+          background: rgba(43, 35, 25, 0.08);
+          color: #2b2319;
+          font: 600 18px/1 "Segoe UI", sans-serif;
+          cursor: pointer;
+        }
+
+        .closeButton:hover {
+          background: rgba(43, 35, 25, 0.14);
+        }
+
+        iframe {
+          flex: 1;
+          width: 100%;
+          border: 0;
+          background: #f5efe4;
+        }
+      </style>
+      <button class="launcher" type="button">MakerWorld 助手</button>
+      <section class="drawer" aria-hidden="true">
+        <div class="header">
+          <div class="headerTitle">
+            <strong>页面工作台</strong>
+            <span>点页面其他地方不会消失，适合边看边保存</span>
+          </div>
+          <button class="closeButton" type="button" aria-label="关闭面板">×</button>
+        </div>
+        <iframe src="${panelUrl}" title="MakerWorld Helper Panel"></iframe>
+      </section>
+    `;
+
+    const launcher = shadowRoot.querySelector(".launcher");
+    const drawer = shadowRoot.querySelector(".drawer");
+    const closeButton = shadowRoot.querySelector(".closeButton");
+
+    function openDrawer() {
+      drawer.classList.add("open");
+      drawer.setAttribute("aria-hidden", "false");
+    }
+
+    function closeDrawer() {
+      drawer.classList.remove("open");
+      drawer.setAttribute("aria-hidden", "true");
+    }
+
+    function toggleDrawer(forceOpen = null) {
+      const nextOpen = typeof forceOpen === "boolean" ? forceOpen : !drawer.classList.contains("open");
+      if (nextOpen) {
+        openDrawer();
+      } else {
+        closeDrawer();
+      }
+    }
+
+    launcher.addEventListener("click", () => toggleDrawer(true));
+    closeButton.addEventListener("click", () => toggleDrawer(false));
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        toggleDrawer(false);
+      }
+    });
+
+    document.documentElement.appendChild(host);
+
+    window.__MWQS_INLINE_PANEL__ = {
+      open: () => toggleDrawer(true),
+      close: () => toggleDrawer(false),
+      toggle: () => toggleDrawer()
+    };
+
+    return window.__MWQS_INLINE_PANEL__;
+  }
+
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type === "mwqs:toggle-inline-panel") {
+      ensureInlinePanel().toggle();
+      sendResponse({ ok: true });
+      return false;
+    }
+
     if (message?.type !== "mwqs:extract-model") {
       return false;
     }
@@ -941,4 +1118,8 @@
 
     return true;
   });
+
+  if (isMakerWorldModelPage(location.href)) {
+    ensureInlinePanel();
+  }
 })();

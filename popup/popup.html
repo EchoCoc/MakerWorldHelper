@@ -20,11 +20,17 @@
           <button id="setDefaultDirectoryButton" class="secondary">设为默认目录</button>
           <button id="restoreDefaultDirectoryButton" class="secondary">恢复默认目录</button>
           <button id="clearDefaultDirectoryButton" class="secondary">清除默认目录</button>
+          <button id="openWorkbenchButton" class="secondary">在页面中打开面板</button>
           <button id="extractButton" class="primary">解析当前页面</button>
           <button id="quickSaveButton" class="primary">一键解析并保存</button>
           <button id="saveButton" class="primary" disabled>保存当前项目</button>
         </div>
         <p id="status" class="status">等待操作</p>
+      </section>
+
+      <section id="workbenchBanner" class="card hidden">
+        <h2>常驻工作台</h2>
+        <p id="workbenchSummary" class="subtle">当前窗口已绑定一个 MakerWorld 页面，切换到其他页面时这里不会自动关闭，保存任务也会继续执行。</p>
       </section>
 
       <section class="card">

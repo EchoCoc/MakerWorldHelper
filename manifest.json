@@ -22,6 +22,19 @@
   "background": {
     "service_worker": "background.js"
   },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "popup/popup.html",
+        "popup/popup.css",
+        "popup/popup.js"
+      ],
+      "matches": [
+        "https://makerworld.com.cn/*",
+        "https://makerworld.com/*"
+      ]
+    }
+  ],
   "content_scripts": [
     {
       "matches": [

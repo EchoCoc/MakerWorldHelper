@@ -2,6 +2,7 @@ const pickDirectoryButton = document.getElementById("pickDirectoryButton");
 const setDefaultDirectoryButton = document.getElementById("setDefaultDirectoryButton");
 const restoreDefaultDirectoryButton = document.getElementById("restoreDefaultDirectoryButton");
 const clearDefaultDirectoryButton = document.getElementById("clearDefaultDirectoryButton");
+const openWorkbenchButton = document.getElementById("openWorkbenchButton");
 const extractButton = document.getElementById("extractButton");
 const quickSaveButton = document.getElementById("quickSaveButton");
 const saveButton = document.getElementById("saveButton");
@@ -18,11 +19,18 @@ const jsonOutputNode = document.getElementById("jsonOutput");
 const savedResourcesCard = document.getElementById("savedResourcesCard");
 const savedResourcesSummaryNode = document.getElementById("savedResourcesSummary");
 const savedResourcesOutputNode = document.getElementById("savedResourcesOutput");
+const workbenchBanner = document.getElementById("workbenchBanner");
+const workbenchSummaryNode = document.getElementById("workbenchSummary");
 
 const DEFAULT_DIRECTORY_DB_NAME = "mw-helper-popup";
 const DEFAULT_DIRECTORY_STORE_NAME = "settings";
 const DEFAULT_DIRECTORY_KEY = "default-save-directory";
 const INVALID_COMPATIBILITY_CODES = new Set(["O1D", "O1S", "N1"]);
+const pageParams = new URLSearchParams(window.location.search);
+const panelMode = pageParams.get("mode") || "";
+const isStandaloneWorkbench = panelMode === "standalone";
+const isInlinePanel = panelMode === "inpage";
+const sourceTabId = Number.parseInt(pageParams.get("sourceTabId") || "", 10);
 
 let currentRecord = null;
 let directoryHandle = null;
@@ -32,6 +40,10 @@ let activeDirectoryIsDefault = false;
 let isBusy = false;
 let selectedInstanceIds = new Set();
 let selectionScopeKey = "";
+
+function getBoundSourceTabId() {
+  return Number.isInteger(sourceTabId) && sourceTabId > 0 ? sourceTabId : null;
+}
 
 function setStatus(message) {
   statusNode.textContent = String(message || "");
@@ -63,6 +75,7 @@ function updateDirectoryActionButtons() {
   setDefaultDirectoryButton.disabled = isBusy || !directoryHandle || activeDirectoryIsDefault;
   restoreDefaultDirectoryButton.disabled = isBusy || !defaultDirectoryHandle || activeDirectoryIsDefault;
   clearDefaultDirectoryButton.disabled = isBusy || !defaultDirectoryHandle;
+  openWorkbenchButton.disabled = isBusy || isStandaloneWorkbench || isInlinePanel;
   extractButton.disabled = isBusy;
   quickSaveButton.disabled = isBusy;
   saveButton.disabled = isBusy || !currentRecord;
@@ -79,6 +92,19 @@ function updateDirectoryActionButtons() {
   setDefaultDirectoryButton.classList.toggle("active", activeDirectoryIsDefault);
   restoreDefaultDirectoryButton.classList.toggle("active", activeDirectoryIsDefault);
   instanceSelectionSection.classList.toggle("disabled", metadataOnlyCheckbox.checked);
+}
+
+function renderWorkbenchBanner() {
+  if (!isStandaloneWorkbench) {
+    workbenchBanner.classList.add("hidden");
+    return;
+  }
+
+  const boundTabId = getBoundSourceTabId();
+  workbenchSummaryNode.textContent = boundTabId
+    ? `当前窗口已绑定 MakerWorld 页面（标签页 ID：${boundTabId}），切到其他页面时这里不会自动关闭，保存任务也会继续执行。`
+    : "当前窗口已进入常驻工作台模式，但还没有绑定有效的 MakerWorld 页面。";
+  workbenchBanner.classList.remove("hidden");
 }
 
 function setBusyState(nextBusy) {
@@ -1019,7 +1045,10 @@ async function extractModel() {
   jsonOutputNode.textContent = "解析中...";
   hideSavedResources();
 
-  const response = await chrome.runtime.sendMessage({ type: "mwqs:get-active-model" });
+  const response = await chrome.runtime.sendMessage({
+    type: "mwqs:get-active-model",
+    tabId: getBoundSourceTabId()
+  });
 
   if (!response?.ok) {
     throw new Error(response?.error || "未知错误");
@@ -1195,6 +1224,26 @@ clearAllInstancesButton.addEventListener("click", () => {
   updateDirectoryActionButtons();
 });
 
+openWorkbenchButton.addEventListener("click", async () => {
+  setBusyState(true);
+  try {
+    const result = await chrome.runtime.sendMessage({
+      type: "mwqs:toggle-inline-panel",
+      tabId: getBoundSourceTabId()
+    });
+    if (!result?.ok) {
+      throw new Error(result?.error || "打开页面面板失败。");
+    }
+
+    setStatus("页面内面板已打开，可以直接在当前页面继续工作。");
+    window.close();
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error));
+  } finally {
+    setBusyState(false);
+  }
+});
+
 pickDirectoryButton.addEventListener("click", async () => {
   setBusyState(true);
   try {
@@ -1304,7 +1353,18 @@ saveButton.addEventListener("click", async () => {
 renderDirectorySummary();
 updateDirectoryActionButtons();
 renderInstanceSelection();
+renderWorkbenchBanner();
 hideSavedResources();
+
+if (isStandaloneWorkbench || isInlinePanel) {
+  openWorkbenchButton.classList.add("hidden");
+}
+
+if (isStandaloneWorkbench) {
+  document.title = "MakerWorld Helper CN - 常驻工作台";
+} else if (isInlinePanel) {
+  document.title = "MakerWorld Helper CN - 页面面板";
+}
 
 loadDefaultDirectoryState()
   .then(async (hasDefault) => {
