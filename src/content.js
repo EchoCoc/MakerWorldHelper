@@ -17,6 +17,56 @@
     return /^https:\/\/makerworld\.(?:com\.cn|com)(?:\/[a-z]{2})?\/models\/.+/i.test(url || "");
   }
 
+  const DOWNLOAD_STATUS_LABELS = {
+    checking: "校验中",
+    complete: "已下载",
+    partial: "已部分下载",
+    "metadata-only": "已保存描述",
+    incomplete: "下载不完整",
+    "not-downloaded": "未下载",
+    recorded: "有保存记录",
+    "needs-permission": "待授权校验",
+    unknown: "待校验"
+  };
+
+  let lastDownloadStatusUrl = "";
+
+  async function checkProjectDownloadStatus({ force = false, showChecking = true } = {}) {
+    if (!isMakerWorldModelPage(location.href)) {
+      return null;
+    }
+
+    const currentUrl = location.href;
+    if (!force && currentUrl === lastDownloadStatusUrl) {
+      return null;
+    }
+
+    lastDownloadStatusUrl = currentUrl;
+    const panel = ensureInlinePanel();
+    if (showChecking) {
+      panel.setDownloadStatus({ state: "checking", message: "正在校验默认目录中的项目。" });
+    }
+
+    try {
+      const result = await chrome.runtime.sendMessage({
+        type: "mwqs:check-project-download",
+        url: currentUrl,
+        forceVerify: force
+      });
+      panel.setDownloadStatus(result?.ok ? result : {
+        state: "unknown",
+        message: result?.error || "暂时无法校验下载状态。"
+      });
+      return result;
+    } catch (error) {
+      panel.setDownloadStatus({
+        state: "unknown",
+        message: error instanceof Error ? error.message : String(error)
+      });
+      return null;
+    }
+  }
+
   function parseNextDataFromHtml(html) {
     const match = html.match(
       /<script[^>]*id=["']__NEXT_DATA__["'][^>]*type=["']application\/json["'][^>]*>([\s\S]*?)<\/script>/
@@ -511,6 +561,197 @@
     }
   }
 
+  const CUSTOMIZATION_SOURCE_PATTERN = /\.(scad|f3d|f3z)(?:[?#].*)?$/i;
+
+  function getCustomizationSourceType(fileName, fallback = "") {
+    const normalizedFallback = normalizeText(fallback);
+    if (normalizedFallback) {
+      return normalizedFallback;
+    }
+
+    const extension = String(fileName || "").match(CUSTOMIZATION_SOURCE_PATTERN)?.[1]?.toLowerCase();
+    if (extension === "scad") {
+      return "OpenSCAD";
+    }
+    if (extension === "f3d" || extension === "f3z") {
+      return "Fusion 360";
+    }
+    return "参数化模型";
+  }
+
+  function buildCustomizationUrl(option, designId) {
+    const explicitUrl = toAbsoluteUrl(
+      option.customizeUrl ||
+        option.customizerUrl ||
+        option.jumpUrl ||
+        option.link ||
+        option.href ||
+        ""
+    );
+    if (explicitUrl && /\/makerlab\/parametricModelMaker/i.test(explicitUrl)) {
+      return explicitUrl;
+    }
+
+    const unikey = normalizeText(
+      option.unikey || option.uniqueKey || option.unique_key || option.uniKey || ""
+    );
+    const modelName = normalizeText(
+      option.modelName || option.fileName || option.filename || option.name || ""
+    );
+    if (!unikey || !modelName) {
+      return "";
+    }
+
+    const locale = location.pathname.match(/^\/([a-z]{2})(?:\/|$)/i)?.[1] || "zh";
+    const url = new URL(`/${locale}/makerlab/parametricModelMaker`, location.origin);
+    url.searchParams.set("unikey", unikey);
+    url.searchParams.set("designId", String(option.designId ?? designId ?? ""));
+    url.searchParams.set("modelName", modelName);
+    if (option.protected != null) {
+      url.searchParams.set("protected", String(Boolean(option.protected)));
+    }
+    return url.href;
+  }
+
+  function collectCustomizationOptions(value, bucket, designId, path = "root", visited = new WeakSet()) {
+    if (!value || typeof value !== "object" || visited.has(value)) {
+      return;
+    }
+    visited.add(value);
+
+    if (Array.isArray(value)) {
+      value.forEach((item, index) =>
+        collectCustomizationOptions(item, bucket, designId, `${path}[${index}]`, visited)
+      );
+      return;
+    }
+
+    const strings = Object.values(value).filter((item) => typeof item === "string");
+    const fileName = normalizeText(
+      value.modelName ||
+        value.fileName ||
+        value.filename ||
+        value.name ||
+        strings.find((item) => CUSTOMIZATION_SOURCE_PATTERN.test(item)) ||
+        ""
+    );
+    const explicitCustomizerUrl = strings.find((item) =>
+      /\/makerlab\/parametricModelMaker/i.test(item)
+    );
+    const objectPathLooksCustomizable = /custom|parametric|makerlab|openscad|fusion/i.test(path);
+    const hasCustomizationIdentity = Boolean(
+      value.unikey || value.uniqueKey || value.unique_key || value.uniKey || explicitCustomizerUrl
+    );
+    const candidateDesignId = value.designId ?? value.design_id ?? null;
+    const belongsToCurrentDesign =
+      candidateDesignId == null ||
+      designId == null ||
+      String(candidateDesignId) === String(designId);
+
+    if (
+      belongsToCurrentDesign &&
+      ((CUSTOMIZATION_SOURCE_PATTERN.test(fileName) &&
+        (objectPathLooksCustomizable || hasCustomizationIdentity)) ||
+        explicitCustomizerUrl)
+    ) {
+      const option = {
+        id: value.id ?? value.fileId ?? value.modelId ?? null,
+        name: fileName || normalizeText(value.title || value.label || "参数化模型"),
+        type: getCustomizationSourceType(
+          fileName,
+          value.typeName || value.fileTypeName || value.engineName || value.engine || ""
+        ),
+        thumbnailUrl: toAbsoluteUrl(
+          value.thumbnailUrl ||
+            value.thumbnail ||
+            value.coverUrl ||
+            value.cover ||
+            value.pictureUrl ||
+            value.imageUrl ||
+            value.image ||
+            ""
+        ),
+        unikey: normalizeText(
+          value.unikey || value.uniqueKey || value.unique_key || value.uniKey || ""
+        ),
+        designId: value.designId ?? designId ?? null,
+        modelName: normalizeText(value.modelName || fileName),
+        protected: value.protected == null ? null : Boolean(value.protected),
+        sourceUrl: toAbsoluteUrl(value.downloadUrl || value.fileUrl || value.sourceUrl || ""),
+        customizeUrl: ""
+      };
+      option.customizeUrl = buildCustomizationUrl(
+        { ...value, ...option, customizeUrl: explicitCustomizerUrl || "" },
+        designId
+      );
+      bucket.push(option);
+    }
+
+    for (const [key, item] of Object.entries(value)) {
+      collectCustomizationOptions(item, bucket, designId, `${path}.${key}`, visited);
+    }
+  }
+
+  function extractCustomizationFromDom(designId) {
+    const options = [];
+    const customizerLinks = Array.from(
+      document.querySelectorAll('a[href*="/makerlab/parametricModelMaker"]')
+    );
+
+    for (const anchor of customizerLinks) {
+      const url = new URL(anchor.href, location.href);
+      const linkedDesignId = url.searchParams.get("designId");
+      if (linkedDesignId && designId != null && String(linkedDesignId) !== String(designId)) {
+        continue;
+      }
+      const modelName = normalizeText(url.searchParams.get("modelName") || anchor.textContent || "");
+      options.push({
+        id: null,
+        name: modelName || "参数化模型",
+        type: getCustomizationSourceType(modelName),
+        thumbnailUrl: "",
+        unikey: normalizeText(url.searchParams.get("unikey") || ""),
+        designId: url.searchParams.get("designId") || designId || null,
+        modelName,
+        protected:
+          url.searchParams.has("protected")
+            ? url.searchParams.get("protected") === "true"
+            : null,
+        sourceUrl: "",
+        customizeUrl: url.href
+      });
+    }
+
+    const customizeControl = Array.from(
+      document.querySelectorAll("button,a,[role='button']")
+    ).find((element) => /(?:定制|自定义|Customize)\s*[（(]?\s*[\d,]*\s*[)）]?/i.test(normalizeText(element.textContent)));
+    const countMatch = normalizeText(customizeControl?.textContent || "").match(/[（(]\s*([\d,]+)\s*[)）]/);
+
+    return {
+      options,
+      count: countMatch ? Number.parseInt(countMatch[1].replace(/,/g, ""), 10) : null,
+      hasCustomizeControl: Boolean(customizeControl)
+    };
+  }
+
+  function buildCustomizationInfo(pageProps, design) {
+    const dataOptions = [];
+    // Related-model and recommendation payloads also contain parametric sources.
+    // Restrict discovery to the current design so they are not attributed to this project.
+    collectCustomizationOptions(design, dataOptions, design?.id ?? null, "design");
+    const domInfo = extractCustomizationFromDom(design?.id ?? null);
+    const options = dedupeBy(
+      [...dataOptions, ...domInfo.options].filter((option) => option.name || option.customizeUrl),
+      (option) => `${option.unikey || ""}::${option.modelName || option.name}::${option.customizeUrl || ""}`
+    );
+
+    return {
+      available: options.length > 0 || domInfo.hasCustomizeControl,
+      count: domInfo.count,
+      options
+    };
+  }
+
   function extractMaterialsFromDom() {
     const materialsHeading = Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6")).find((element) =>
       /物料清单|BOM|Material/i.test(normalizeText(element.textContent))
@@ -768,8 +1009,11 @@
     }
   }
 
-  async function mapInstance(instance) {
+  async function mapInstance(instance, designCreator = null) {
     const modelInfo = instance?.extention?.modelInfo || {};
+    const instanceCreator = instance?.instanceCreator || {};
+    const instanceCreatorUid = String(instanceCreator?.uid ?? "").trim();
+    const designCreatorUid = String(designCreator?.uid ?? "").trim();
     const compatibility = sanitizeCompatibilityValue(modelInfo.compatibility || null);
     const otherCompatibility = Array.isArray(modelInfo.otherCompatibility)
       ? sanitizeCompatibilityValue(modelInfo.otherCompatibility)
@@ -781,6 +1025,18 @@
       profileId: instance?.profileId ?? null,
       title: instance?.title || "",
       summary: instance?.summary || "",
+      summaryText: stripHtml(instance?.summaryTranslated || instance?.summary || ""),
+      creator: {
+        uid: instanceCreator?.uid ?? null,
+        name: instanceCreator?.name || "",
+        handle: instanceCreator?.handle || "",
+        avatarUrl: instanceCreator?.avatar || ""
+      },
+      isDesigner: Boolean(
+        instanceCreatorUid && designCreatorUid && instanceCreatorUid === designCreatorUid
+      ),
+      isAuthorsChoice: Boolean(instance?.extention?.instanceSetting?.authorsChoice),
+      isOfficial: Boolean(instance?.isOfficial),
       coverUrl: instance?.cover || "",
       createdAt: instance?.createTime || "",
       updatedAt: instance?.updateTime || "",
@@ -797,6 +1053,12 @@
       needAms: Boolean(instance?.needAms),
       predictionSeconds: instance?.prediction ?? null,
       weightGrams: instance?.weight ?? null,
+      nozzleDiameter: modelInfo?.compatibility?.nozzleDiameter ?? null,
+      printSettings: {
+        layerHeight: modelInfo?.projectSettings?.layerHeight || "",
+        wallLoops: modelInfo?.projectSettings?.wallLoops || "",
+        sparseInfillDensity: modelInfo?.projectSettings?.sparseInfillDensity || ""
+      },
       compatibility,
       compatibilityText: formatCompatibility(compatibility, otherCompatibility),
       otherCompatibility,
@@ -857,13 +1119,14 @@
           : domMaterials.groups,
       download: domMaterials.download
     };
+    const customization = buildCustomizationInfo(pageProps, design);
 
     const title = design.title || document.title || "makerworld-model";
     const slugBase = slugifySegment(`${design.id || "model"}-${title}`);
     const instances = [];
 
     for (const instance of Array.isArray(design.instances) ? design.instances : []) {
-      instances.push(await mapInstance(instance));
+      instances.push(await mapInstance(instance, design.designCreator));
       await delay(80);
     }
 
@@ -898,7 +1161,8 @@
         tags: Array.isArray(design.tags) ? design.tags : [],
         pictures: Array.isArray(extension.design_pictures) ? extension.design_pictures : [],
         documents,
-        materials
+        materials,
+        customization
       },
       creator: {
         uid: creator.uid ?? null,
@@ -952,7 +1216,10 @@
           z-index: 2147483644;
           border: 0;
           border-radius: 999px;
-          padding: 12px 14px;
+          display: flex;
+          align-items: center;
+          gap: 9px;
+          padding: 9px 10px 9px 14px;
           background: rgba(17, 17, 17, 0.88);
           color: #fff;
           font: 600 13px/1.2 "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -963,6 +1230,38 @@
 
         .launcher:hover {
           background: rgba(17, 17, 17, 0.96);
+        }
+
+        .downloadStatus {
+          border-radius: 999px;
+          padding: 5px 8px;
+          background: rgba(255, 255, 255, 0.14);
+          color: rgba(255, 255, 255, 0.9);
+          font-size: 11px;
+          font-weight: 700;
+          white-space: nowrap;
+        }
+
+        .downloadStatus[data-state="complete"] {
+          background: #dff4e7;
+          color: #17633a;
+        }
+
+        .downloadStatus[data-state="partial"],
+        .downloadStatus[data-state="metadata-only"],
+        .downloadStatus[data-state="recorded"] {
+          background: #fff0c7;
+          color: #714a00;
+        }
+
+        .downloadStatus[data-state="incomplete"] {
+          background: #ffe0dc;
+          color: #8f271c;
+        }
+
+        .downloadStatus[data-state="not-downloaded"] {
+          background: rgba(255, 255, 255, 0.18);
+          color: #fff;
         }
 
         .drawer {
@@ -1039,7 +1338,10 @@
           background: #f5efe4;
         }
       </style>
-      <button class="launcher" type="button">MakerWorld 助手</button>
+      <button class="launcher" type="button">
+        <span>MakerWorld 助手</span>
+        <span class="downloadStatus" data-state="checking">校验中</span>
+      </button>
       <section class="drawer" aria-hidden="true">
         <div class="header">
           <div class="headerTitle">
@@ -1053,12 +1355,14 @@
     `;
 
     const launcher = shadowRoot.querySelector(".launcher");
+    const downloadStatus = shadowRoot.querySelector(".downloadStatus");
     const drawer = shadowRoot.querySelector(".drawer");
     const closeButton = shadowRoot.querySelector(".closeButton");
 
     function openDrawer() {
       drawer.classList.add("open");
       drawer.setAttribute("aria-hidden", "false");
+      void checkProjectDownloadStatus({ force: true });
     }
 
     function closeDrawer() {
@@ -1088,13 +1392,35 @@
     window.__MWQS_INLINE_PANEL__ = {
       open: () => toggleDrawer(true),
       close: () => toggleDrawer(false),
-      toggle: () => toggleDrawer()
+      toggle: () => toggleDrawer(),
+      setDownloadStatus: (result = {}) => {
+        const state = DOWNLOAD_STATUS_LABELS[result.state] ? result.state : "unknown";
+        downloadStatus.dataset.state = state;
+        downloadStatus.textContent = DOWNLOAD_STATUS_LABELS[state];
+        launcher.title = [
+          result.message || "",
+          result.folderName ? `本地目录：${result.folderName}` : "",
+          result.missingCount > 0 ? `缺失 3MF：${result.missingCount}` : ""
+        ].filter(Boolean).join("\n");
+      }
     };
 
     return window.__MWQS_INLINE_PANEL__;
   }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type === "mwqs:download-status-updated") {
+      if (message.status) {
+        ensureInlinePanel().setDownloadStatus(message.status);
+      }
+      void checkProjectDownloadStatus({
+        force: Boolean(message.forceVerify),
+        showChecking: !message.status
+      });
+      sendResponse({ ok: true });
+      return false;
+    }
+
     if (message?.type === "mwqs:toggle-inline-panel") {
       ensureInlinePanel().toggle();
       sendResponse({ ok: true });
@@ -1121,5 +1447,19 @@
 
   if (isMakerWorldModelPage(location.href)) {
     ensureInlinePanel();
+    void checkProjectDownloadStatus();
   }
+
+  let observedPageUrl = location.href;
+  setInterval(() => {
+    if (location.href === observedPageUrl) {
+      return;
+    }
+
+    observedPageUrl = location.href;
+    if (isMakerWorldModelPage(observedPageUrl)) {
+      ensureInlinePanel();
+      void checkProjectDownloadStatus();
+    }
+  }, 1000);
 })();

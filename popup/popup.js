@@ -24,7 +24,10 @@ const workbenchSummaryNode = document.getElementById("workbenchSummary");
 
 const DEFAULT_DIRECTORY_DB_NAME = "mw-helper-popup";
 const DEFAULT_DIRECTORY_STORE_NAME = "settings";
+const PROJECT_INDEX_STORE_NAME = "projects";
+const SETTINGS_DATABASE_VERSION = 2;
 const DEFAULT_DIRECTORY_KEY = "default-save-directory";
+const LEGACY_DOWNLOAD_INDEX_KEY = "mwqs:download-index:v1";
 const INVALID_COMPATIBILITY_CODES = new Set(["O1D", "O1S", "N1"]);
 const pageParams = new URLSearchParams(window.location.search);
 const panelMode = pageParams.get("mode") || "";
@@ -43,6 +46,17 @@ let selectionScopeKey = "";
 
 function getBoundSourceTabId() {
   return Number.isInteger(sourceTabId) && sourceTabId > 0 ? sourceTabId : null;
+}
+
+async function refreshBoundPageDownloadStatus() {
+  try {
+    await chrome.runtime.sendMessage({
+      type: "mwqs:refresh-project-download-status",
+      tabId: getBoundSourceTabId()
+    });
+  } catch {
+    // The save flow remains valid even if the source tab was closed.
+  }
 }
 
 function setStatus(message) {
@@ -129,12 +143,15 @@ function clearDefaultDirectoryState() {
 
 function openSettingsDatabase() {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DEFAULT_DIRECTORY_DB_NAME, 1);
+    const request = indexedDB.open(DEFAULT_DIRECTORY_DB_NAME, SETTINGS_DATABASE_VERSION);
 
     request.onupgradeneeded = () => {
       const database = request.result;
       if (!database.objectStoreNames.contains(DEFAULT_DIRECTORY_STORE_NAME)) {
         database.createObjectStore(DEFAULT_DIRECTORY_STORE_NAME);
+      }
+      if (!database.objectStoreNames.contains(PROJECT_INDEX_STORE_NAME)) {
+        database.createObjectStore(PROJECT_INDEX_STORE_NAME, { keyPath: "modelId" });
       }
     };
 
@@ -198,6 +215,19 @@ async function clearStoredDefaultDirectory() {
       reject(request.error || new Error("清除默认目录失败。"));
     };
   });
+}
+
+async function clearProjectDownloadIndex() {
+  const database = await openSettingsDatabase();
+  await new Promise((resolve, reject) => {
+    const transaction = database.transaction(PROJECT_INDEX_STORE_NAME, "readwrite");
+    transaction.objectStore(PROJECT_INDEX_STORE_NAME).clear();
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error || new Error("清理项目下载索引失败。"));
+    transaction.onabort = () => reject(transaction.error || new Error("清理项目下载索引失败。"));
+  });
+  database.close();
+  await chrome.storage.local.remove(LEGACY_DOWNLOAD_INDEX_KEY);
 }
 
 async function loadDefaultDirectoryState() {
@@ -671,13 +701,31 @@ async function readExistingFile(parentHandle, name) {
 }
 
 async function fetchBlob(url) {
-  const response = await fetch(url, { credentials: "omit" });
+  let lastError = null;
 
-  if (!response.ok) {
-    throw new Error(`下载失败: ${response.status} ${url}`);
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        credentials: "omit",
+        cache: "no-store",
+        headers: { Accept: "*/*" }
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      return response.blob();
+    } catch (error) {
+      lastError = error;
+      if (attempt < 3) {
+        await new Promise((resolve) => setTimeout(resolve, attempt * 350));
+      }
+    }
   }
 
-  return response.blob();
+  const reason = lastError instanceof Error ? lastError.message : String(lastError || "未知错误");
+  throw new Error(`下载失败: ${reason} ${url}`);
 }
 
 async function writeBlobFile(parentHandle, name, blob) {
@@ -713,6 +761,24 @@ function recordTransferStats(saved, transferResult) {
     saved.reusedCount += 1;
   } else {
     saved.downloadedCount += 1;
+  }
+}
+
+function recordAssetFailure(saved, kind, url, error, details = {}) {
+  saved.failedAssets.push({
+    kind,
+    url: String(url || ""),
+    reason: error instanceof Error ? error.message : String(error),
+    ...details
+  });
+}
+
+async function downloadOptionalToFile(saved, kind, parentHandle, url, fallbackName, options, details = {}) {
+  try {
+    return await downloadToFile(parentHandle, url, fallbackName, options);
+  } catch (error) {
+    recordAssetFailure(saved, kind, url, error, details);
+    return null;
   }
 }
 
@@ -831,6 +897,7 @@ async function saveAssets(rootHandle, record, saveOptions = {}) {
     materialFiles: [],
     modelFiles: [],
     modelFilesMissing: [],
+    failedAssets: [],
     downloadedCount: 0,
     reusedCount: 0
   };
@@ -844,9 +911,14 @@ async function saveAssets(rootHandle, record, saveOptions = {}) {
   }
 
   if (!saveOptions.metadataOnly && record?.model?.coverUrl) {
-    const transfer = await downloadToFile(imagesDir, record.model.coverUrl, "cover.jpg", {
-      preferExisting: true
-    });
+    const transfer = await downloadOptionalToFile(
+      saved,
+      "model-cover",
+      imagesDir,
+      record.model.coverUrl,
+      "cover.jpg",
+      { preferExisting: true }
+    );
     recordTransferStats(saved, transfer);
     saved.cover = transfer?.fileName || null;
   }
@@ -854,11 +926,14 @@ async function saveAssets(rootHandle, record, saveOptions = {}) {
   if (!saveOptions.metadataOnly) {
     for (let index = 0; index < (record?.model?.pictures || []).length; index += 1) {
       const picture = record.model.pictures[index];
-      const transfer = await downloadToFile(
+      const transfer = await downloadOptionalToFile(
+        saved,
+        "model-picture",
         imagesDir,
         picture.url,
         `detail-${String(index + 1).padStart(2, "0")}.jpg`,
-        { preferExisting: true }
+        { preferExisting: true },
+        { index }
       );
       recordTransferStats(saved, transfer);
       saved.pictures.push({ source: picture.url, fileName: transfer?.fileName || null });
@@ -875,38 +950,43 @@ async function saveAssets(rootHandle, record, saveOptions = {}) {
       const fallbackName =
         sanitizeName(documentItem.title || `document-${String(index + 1).padStart(2, "0")}.pdf`) ||
         `document-${String(index + 1).padStart(2, "0")}.pdf`;
-      try {
-        const transfer = await downloadToFile(documentsDir, documentItem.url, fallbackName, {
-          preferExisting: true
-        });
+      const transfer = await downloadOptionalToFile(
+        saved,
+        "document",
+        documentsDir,
+        documentItem.url,
+        fallbackName,
+        { preferExisting: true },
+        { title: documentItem.title || "" }
+      );
+      if (transfer) {
         recordTransferStats(saved, transfer);
         saved.documents.push({
           title: documentItem.title || transfer?.fileName,
           source: documentItem.url,
           fileName: transfer?.fileName || null
         });
-      } catch {
-        // Ignore broken document links so the main project can still be saved.
       }
     }
   }
 
   if (!saveOptions.metadataOnly && record?.model?.materials?.download?.url) {
-    try {
-      const transfer = await downloadToFile(
-        documentsDir,
-        record.model.materials.download.url,
-        sanitizeName(record.model.materials.download.title || "materials-list") || "materials-list",
-        { preferExisting: true }
-      );
+    const transfer = await downloadOptionalToFile(
+      saved,
+      "materials-document",
+      documentsDir,
+      record.model.materials.download.url,
+      sanitizeName(record.model.materials.download.title || "materials-list") || "materials-list",
+      { preferExisting: true },
+      { title: record.model.materials.download.title || "" }
+    );
+    if (transfer) {
       recordTransferStats(saved, transfer);
       saved.materialFiles.push({
         title: record.model.materials.download.title || transfer?.fileName,
         source: record.model.materials.download.url,
         fileName: transfer?.fileName || null
       });
-    } catch {
-      // Ignore broken material download links and keep the generated material list files.
     }
   }
 
@@ -961,20 +1041,30 @@ async function saveAssets(rootHandle, record, saveOptions = {}) {
     await writeTextFile(instanceDir, "instance.json", JSON.stringify(instance, null, 2));
 
     if (shouldDownloadFiles && instance.coverUrl) {
-      const transfer = await downloadToFile(instanceDir, instance.coverUrl, "instance-cover.jpg", {
-        preferExisting: true
-      });
+      const transfer = await downloadOptionalToFile(
+        saved,
+        "instance-cover",
+        instanceDir,
+        instance.coverUrl,
+        "instance-cover.jpg",
+        { preferExisting: true },
+        { instanceId: instance.id }
+      );
       recordTransferStats(saved, transfer);
       saved.instancePictures.push({ instanceId: instance.id, fileName: transfer?.fileName || null });
     }
 
     if (shouldDownloadFiles) {
       for (const plate of instance.plates || []) {
-        const transfer = await downloadToFile(
+        const plateUrl = plate.thumbnailUrl || plate.topPictureUrl || plate.pickPictureUrl;
+        const transfer = await downloadOptionalToFile(
+          saved,
+          "plate-picture",
           plateDir,
-          plate.thumbnailUrl || plate.topPictureUrl || plate.pickPictureUrl,
+          plateUrl,
           `plate-${plate.index || "x"}.png`,
-          { preferExisting: true }
+          { preferExisting: true },
+          { instanceId: instance.id, plateIndex: plate.index }
         );
         recordTransferStats(saved, transfer);
         saved.plates.push({
@@ -1106,13 +1196,16 @@ async function runSaveFlow() {
     result.assets?.downloadedCount > 0 ? `，新下载 ${result.assets.downloadedCount} 个文件` : "";
   const reusedSummary = result.assets?.reusedCount > 0 ? `，复用 ${result.assets.reusedCount} 个已有文件` : "";
   const modeSummary = result.assets?.metadataOnly ? "，本次仅保存描述和元数据" : "";
+  const failedAssetSummary = result.assets?.failedAssets?.length > 0
+    ? `，另有 ${result.assets.failedAssets.length} 个图片或附件下载失败，已记录并继续保存`
+    : "";
 
   setStatus(
     summary.captchaBlockedCount > 0
-      ? `保存完成，目录名：${result.folderName}${modeSummary}${downloadedSummary}${reusedSummary}。其中 ${summary.captchaBlockedCount} 个配置的 3MF 被站点人机验证拦截，请回到 MakerWorld 页面完成验证后重新保存。`
+      ? `保存完成，目录名：${result.folderName}${modeSummary}${downloadedSummary}${reusedSummary}${failedAssetSummary}。其中 ${summary.captchaBlockedCount} 个配置的 3MF 被站点人机验证拦截，请回到 MakerWorld 页面完成验证后重新保存。`
       : result.missingModelFileCount > 0
-        ? `保存完成，目录名：${result.folderName}${modeSummary}${downloadedSummary}${reusedSummary}。其中 ${result.missingModelFileCount} 个配置未保存到 3MF。`
-        : `保存完成，目录名：${result.folderName}${modeSummary}${downloadedSummary}${reusedSummary}`
+        ? `保存完成，目录名：${result.folderName}${modeSummary}${downloadedSummary}${reusedSummary}${failedAssetSummary}。其中 ${result.missingModelFileCount} 个配置未保存到 3MF。`
+        : `保存完成，目录名：${result.folderName}${modeSummary}${downloadedSummary}${reusedSummary}${failedAssetSummary}`
   );
 
   const shouldShowResources = window.confirm(
@@ -1188,6 +1281,7 @@ async function saveRecord() {
     folderName: rootFolderName,
     modelId: sanitizedRecord.model?.id ?? null,
     title: sanitizedRecord.model?.title || "",
+    customization: sanitizedRecord.model?.customization || null,
     saveOptions: {
       metadataOnly: saveOptions.metadataOnly,
       selectedInstanceIds: [...saveOptions.selectedInstanceIds]
@@ -1196,6 +1290,38 @@ async function saveRecord() {
   };
 
   await writeTextFile(projectDir, "save-manifest.json", JSON.stringify(manifest, null, 2));
+  try {
+    const downloadableInstances = (sanitizedRecord.instances || []).filter(shouldExpectModelFile);
+    const selectedDownloadableCount = downloadableInstances.filter((instance) =>
+      saveOptions.selectedInstanceIds.has(getInstanceSelectionId(instance))
+    ).length;
+    const missingModelFileCount = assets.modelFilesMissing?.length || 0;
+    const downloadState = saveOptions.metadataOnly
+      ? "metadata-only"
+      : missingModelFileCount > 0
+        ? "incomplete"
+        : selectedDownloadableCount < downloadableInstances.length
+          ? "partial"
+          : "complete";
+
+    await chrome.runtime.sendMessage({
+      type: "mwqs:record-project-download",
+      entry: {
+        modelId: manifest.modelId,
+        folderName: manifest.folderName,
+        rootDirectoryName: directoryHandle?.name || "",
+        savedAt: manifest.savedAt,
+        metadataOnly: manifest.saveOptions.metadataOnly,
+        selectedInstanceIds: manifest.saveOptions.selectedInstanceIds,
+        selectedCount: manifest.saveOptions.selectedInstanceIds.length,
+        totalCount: sanitizedRecord.instances?.length || 0,
+        missingModelFileCount,
+        state: downloadState
+      }
+    });
+  } catch {
+    // The manifest is the source of truth; the index can be rebuilt from it later.
+  }
   return {
     folderName: rootFolderName,
     assets,
@@ -1266,12 +1392,14 @@ setDefaultDirectoryButton.addEventListener("click", async () => {
     }
 
     await writeStoredDefaultDirectory(directoryHandle);
+    await clearProjectDownloadIndex();
     defaultDirectoryHandle = directoryHandle;
     defaultDirectoryName = directoryHandle.name || "已保存目录";
     activeDirectoryIsDefault = true;
     renderDirectorySummary();
     updateDirectoryActionButtons();
     setStatus(`已将 ${defaultDirectoryName} 设为默认目录。`);
+    await refreshBoundPageDownloadStatus();
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));
   } finally {
@@ -1286,6 +1414,7 @@ restoreDefaultDirectoryButton.addEventListener("click", async () => {
     await restoreDefaultDirectory({ requestAccess: true });
     hideSavedResources();
     setStatus(`已恢复默认目录：${defaultDirectoryName}。`);
+    await refreshBoundPageDownloadStatus();
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));
   } finally {
@@ -1297,8 +1426,10 @@ clearDefaultDirectoryButton.addEventListener("click", async () => {
   setBusyState(true);
   try {
     await clearStoredDefaultDirectory();
+    await clearProjectDownloadIndex();
     clearDefaultDirectoryState();
     setStatus("已清除默认目录设置。");
+    await refreshBoundPageDownloadStatus();
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));
   } finally {
@@ -1375,6 +1506,7 @@ loadDefaultDirectoryState()
     try {
       await restoreDefaultDirectory({ requestAccess: false });
       setStatus(`已自动恢复默认目录：${defaultDirectoryName}。`);
+      await refreshBoundPageDownloadStatus();
     } catch {
       setStatus(`已识别默认目录：${defaultDirectoryName}，点击“恢复默认目录”后可继续使用。`);
     }

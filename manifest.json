@@ -12,6 +12,10 @@
     "https://makerworld.com.cn/*",
     "https://makerworld.com/*",
     "https://makerworld.bblmw.cn/*",
+    "https://*.bblmw.cn/*",
+    "https://*.bblmw.com/*",
+    "https://*.bambulab.cn/*",
+    "https://*.bambulab.com/*",
     "https://public-cdn.bblmw.cn/*",
     "https://public-cdn.bambulab.com/*"
   ],

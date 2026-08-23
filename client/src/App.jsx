@@ -7,6 +7,10 @@ const PRINT_QUEUE_STORAGE_KEY = "mw-helper.desktop.print-queue";
 const PROJECTS_PER_PAGE = 24;
 const DEFAULT_SORT_KEY = "updated-desc";
 const QUEUE_REPO_ID = "queue";
+const APP_WINDOW_PARAMS = new URLSearchParams(window.location.search);
+const IS_PROJECT_DETAIL_WINDOW = APP_WINDOW_PARAMS.get("window") === "project";
+const PROJECT_DETAIL_ROOT_PATH = APP_WINDOW_PARAMS.get("rootPath") || "";
+const PROJECT_DETAIL_PROJECT_PATH = APP_WINDOW_PARAMS.get("projectPath") || "";
 const QUEUE_STAGE_OPTIONS = [
   { id: "printing", label: "打印中" },
   { id: "assembly", label: "拼装中" }
@@ -95,6 +99,22 @@ function writeCachedQueueEntries(queueEntries) {
   } catch {
     // Ignore storage failures and continue without persistence.
   }
+}
+
+function mergeQueueEntries(...entryGroups) {
+  const merged = {};
+
+  for (const entries of entryGroups) {
+    for (const [key, entry] of Object.entries(entries || {})) {
+      const existingTime = Date.parse(merged[key]?.markedAt || "") || 0;
+      const candidateTime = Date.parse(entry?.markedAt || "") || 0;
+      if (!merged[key] || candidateTime >= existingTime) {
+        merged[key] = entry;
+      }
+    }
+  }
+
+  return merged;
 }
 
 function getProjectQueueKey(project) {
@@ -352,7 +372,9 @@ export default function App() {
     typeof window !== "undefined" &&
     typeof window.desktopAPI?.pickDirectory === "function" &&
     typeof window.desktopAPI?.scanRoot === "function";
-  const [rootPath, setRootPath] = useState("");
+  const [rootPath, setRootPath] = useState(() =>
+    IS_PROJECT_DETAIL_WINDOW ? PROJECT_DETAIL_ROOT_PATH : ""
+  );
   const [repositories, setRepositories] = useState([]);
   const [allProjects, setAllProjects] = useState([]);
   const [selectedRepoId, setSelectedRepoId] = useState("all");
@@ -362,7 +384,11 @@ export default function App() {
   const [currentPage, setCurrentPage] = useState(1);
   const [queueEntries, setQueueEntries] = useState(() => readCachedQueueEntries());
   const [status, setStatus] = useState(() =>
-    hasDesktopApi ? "等待选择根目录。" : "当前为浏览器模式，请使用桌面端打开本地资源库。"
+    hasDesktopApi
+      ? IS_PROJECT_DETAIL_WINDOW
+        ? "正在加载项目详情…"
+        : "等待选择根目录。"
+      : "当前为浏览器模式，请使用桌面端打开本地资源库。"
   );
   const [textDialog, setTextDialog] = useState(null);
   const [confirmDialog, setConfirmDialog] = useState(null);
@@ -374,9 +400,33 @@ export default function App() {
       const resolvedEntries =
         typeof updater === "function" ? updater(currentEntries) : updater || {};
       writeCachedQueueEntries(resolvedEntries);
+      void window.desktopAPI?.writePrintQueue?.(resolvedEntries);
       return resolvedEntries;
     });
   }
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function hydratePrintQueue() {
+      const result = await window.desktopAPI?.readPrintQueue?.();
+      if (cancelled || !result?.ok) {
+        return;
+      }
+
+      setQueueEntries((currentEntries) => {
+        const mergedEntries = mergeQueueEntries(result.entries, currentEntries);
+        writeCachedQueueEntries(mergedEntries);
+        void window.desktopAPI?.writePrintQueue?.(mergedEntries);
+        return mergedEntries;
+      });
+    }
+
+    void hydratePrintQueue();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const decoratedProjects = useMemo(
     () =>
@@ -456,6 +506,82 @@ export default function App() {
       : decoratedProjects.find((project) => project.id === selectedProjectId) || null;
 
   useEffect(() => {
+    if (!IS_PROJECT_DETAIL_WINDOW) {
+      return undefined;
+    }
+
+    document.title = selectedProject
+      ? `${selectedProject.title} - MakerWorld Helper`
+      : "项目详情 - MakerWorld Helper";
+    return undefined;
+  }, [selectedProject]);
+
+  useEffect(() => {
+    function handleStorage(event) {
+      if (event.key === PRINT_QUEUE_STORAGE_KEY) {
+        setQueueEntries(readCachedQueueEntries());
+      }
+    }
+
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
+  }, []);
+
+  useEffect(() => {
+    if (
+      !hasDesktopApi ||
+      !rootPath ||
+      typeof window.desktopAPI?.watchRoot !== "function" ||
+      typeof window.desktopAPI?.onProjectChanged !== "function"
+    ) {
+      return undefined;
+    }
+
+    let disposed = false;
+    const unsubscribe = window.desktopAPI.onProjectChanged((payload) => {
+      const changedProjectPath = String(payload?.projectPath || "").toLocaleLowerCase();
+      const isCurrentRoot =
+        String(payload?.rootPath || "").toLocaleLowerCase() === rootPath.toLocaleLowerCase();
+      const isCurrentDetailProject =
+        !IS_PROJECT_DETAIL_WINDOW ||
+        changedProjectPath === PROJECT_DETAIL_PROJECT_PATH.toLocaleLowerCase();
+
+      if (disposed || !payload?.project || !isCurrentRoot || !isCurrentDetailProject) {
+        return;
+      }
+
+      let nextProjectsSnapshot = null;
+      setAllProjects((currentProjects) => {
+        nextProjectsSnapshot = upsertProject(
+          currentProjects,
+          payload.projectPath,
+          payload.project
+        );
+        return nextProjectsSnapshot;
+      });
+      setRepositories((currentRepositories) =>
+        syncRepositoryCounts(currentRepositories, nextProjectsSnapshot || allProjects)
+      );
+      if (IS_PROJECT_DETAIL_WINDOW) {
+        setSelectedProjectId(payload.project.id);
+      }
+      setStatus(`已自动刷新项目 “${payload.project.title}”。`);
+    });
+
+    window.desktopAPI.watchRoot(rootPath).then((result) => {
+      if (!disposed && !result?.ok) {
+        console.warn("无法监听资源库变化：", result?.error || "未知错误");
+      }
+    });
+
+    return () => {
+      disposed = true;
+      unsubscribe();
+      void window.desktopAPI?.unwatchRoot?.();
+    };
+  }, [hasDesktopApi, rootPath]);
+
+  useEffect(() => {
     setCurrentPage(1);
   }, [selectedRepoId, searchText, sortKey]);
 
@@ -466,6 +592,10 @@ export default function App() {
   }, [currentPage, totalPages]);
 
   useEffect(() => {
+    if (IS_PROJECT_DETAIL_WINDOW) {
+      return;
+    }
+
     if (!repositories.length && allProjects.length === 0) {
       return;
     }
@@ -504,7 +634,54 @@ export default function App() {
   }, [allProjects, repositories.length]);
 
   useEffect(() => {
-    if (!hasDesktopApi) {
+    if (!hasDesktopApi || !IS_PROJECT_DETAIL_WINDOW) {
+      return undefined;
+    }
+
+    if (!PROJECT_DETAIL_ROOT_PATH || !PROJECT_DETAIL_PROJECT_PATH) {
+      setStatus("缺少项目路径，无法打开项目详情。");
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    setRootPath(PROJECT_DETAIL_ROOT_PATH);
+    setStatus("正在读取项目详情…");
+
+    (async () => {
+      const result = await window.desktopAPI?.refreshProject?.(
+        PROJECT_DETAIL_ROOT_PATH,
+        PROJECT_DETAIL_PROJECT_PATH
+      );
+      if (cancelled) {
+        return;
+      }
+
+      if (!result?.ok) {
+        setStatus(result?.error || "项目详情加载失败。");
+        return;
+      }
+
+      if (!result.project) {
+        setStatus("项目已被移动或删除，无法打开项目详情。");
+        return;
+      }
+
+      setRepositories([]);
+      setAllProjects([result.project]);
+      setSelectedRepoId(result.project.repoId || "all");
+      setSelectedProjectId(result.project.id);
+      setCurrentPage(1);
+      setStatus("项目详情已加载。");
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hasDesktopApi]);
+
+  useEffect(() => {
+    if (!hasDesktopApi || IS_PROJECT_DETAIL_WINDOW) {
       return undefined;
     }
 
@@ -521,9 +698,11 @@ export default function App() {
     (async () => {
       const cacheResult = await window.desktopAPI?.readLibraryCache?.(cachedRootPath);
       if (!cancelled && cacheResult?.ok && cacheResult?.data) {
+        const cachedProjects = cacheResult.data.projects || [];
         applyLibrarySnapshot({
           repositories: cacheResult.data.repositories || [],
-          projects: cacheResult.data.projects || [],
+          projects: cachedProjects,
+          nextProjectId: null,
           virtualRepoIds: [QUEUE_REPO_ID],
           setRepositories,
           setAllProjects,
@@ -531,7 +710,7 @@ export default function App() {
           setSelectedProjectId,
           setCurrentPage
         });
-        setStatus(`已从缓存恢复 ${cacheResult.data.projects?.length || 0} 个项目，正在后台刷新…`);
+        setStatus(`已从缓存恢复 ${cachedProjects.length} 个项目，正在后台刷新…`);
       } else if (!cancelled) {
         setStatus("正在扫描本地项目…");
       }
@@ -559,6 +738,7 @@ export default function App() {
       applyLibrarySnapshot({
         repositories: nextRepositories,
         projects: nextProjects,
+        nextProjectId: null,
         virtualRepoIds: [QUEUE_REPO_ID],
         setRepositories,
         setAllProjects,
@@ -948,6 +1128,40 @@ export default function App() {
     setStatus(`项目 “${project.title}” 已删除。`);
   }
 
+  async function handleOpenProject(projectId) {
+    if (projectId == null) {
+      setSelectedProjectId(null);
+      return;
+    }
+
+    const project = decoratedProjects.find((item) => item.id === projectId);
+    if (!project) {
+      setStatus("未找到要打开的项目。");
+      return;
+    }
+
+    if (
+      !IS_PROJECT_DETAIL_WINDOW &&
+      rootPath &&
+      typeof window.desktopAPI?.openProjectWindow === "function"
+    ) {
+      const result = await window.desktopAPI.openProjectWindow(
+        rootPath,
+        project.projectPath,
+        project.title
+      );
+      if (!result?.ok) {
+        setStatus(result?.error || "打开项目详情窗口失败。");
+        return;
+      }
+
+      setStatus(result.reused ? `已切换到“${project.title}”的详情窗口。` : `已打开“${project.title}”。`);
+      return;
+    }
+
+    setSelectedProjectId(projectId);
+  }
+
   return (
     <>
       <Routes>
@@ -967,6 +1181,7 @@ export default function App() {
               searchText={searchText}
               sortKey={sortKey}
               status={status}
+              isProjectWindow={IS_PROJECT_DETAIL_WINDOW}
               canPickRoot={hasDesktopApi}
               onPickRoot={handlePickRoot}
               onImport3mf={handleImport3mf}
@@ -989,7 +1204,8 @@ export default function App() {
                 setSelectedRepoId(repoId);
                 setSelectedProjectId(null);
               }}
-              onProjectChange={setSelectedProjectId}
+              onProjectChange={handleOpenProject}
+              onCloseProjectWindow={() => window.close()}
               onPageChange={setCurrentPage}
               onSearchChange={setSearchText}
               onSortChange={setSortKey}

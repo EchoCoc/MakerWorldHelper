@@ -1,5 +1,6 @@
 const path = require("path");
 const crypto = require("crypto");
+const fsNative = require("fs");
 const fs = require("fs/promises");
 const { pathToFileURL } = require("url");
 const AdmZip = require("adm-zip");
@@ -20,6 +21,7 @@ const LOCAL_ASSET_CONTENT_TYPES = {
   ".avif": "image/avif"
 };
 const LIBRARY_CACHE_VERSION = 3;
+const PRINT_QUEUE_FILE_NAME = "print-queue.json";
 const THREE_MF_XML_PARSER = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: "",
@@ -35,6 +37,150 @@ const INSTANCE_COVER_CANDIDATES = [
   "instance-cover.gif"
 ];
 const INVALID_COMPATIBILITY_CODES = new Set(["O1D", "O1S", "N1"]);
+const projectWindows = new Map();
+const libraryWatchers = new Map();
+let mainWindow = null;
+
+function getPrintQueueFilePath() {
+  return path.join(app.getPath("userData"), PRINT_QUEUE_FILE_NAME);
+}
+
+async function readPrintQueueEntries() {
+  try {
+    const parsed = JSON.parse(await fs.readFile(getPrintQueueFilePath(), "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return {};
+    }
+    throw error;
+  }
+}
+
+async function writePrintQueueEntries(entries) {
+  const safeEntries = entries && typeof entries === "object" && !Array.isArray(entries) ? entries : {};
+  await fs.writeFile(getPrintQueueFilePath(), JSON.stringify(safeEntries, null, 2), "utf8");
+  return safeEntries;
+}
+
+function getLibraryWatcherKey(rootPath) {
+  return path.resolve(rootPath).toLocaleLowerCase();
+}
+
+function removeWatcherSubscriber(webContentsId) {
+  for (const [watcherKey, watcherState] of libraryWatchers) {
+    watcherState.subscribers.delete(webContentsId);
+    if (watcherState.subscribers.size > 0) {
+      continue;
+    }
+
+    clearTimeout(watcherState.flushTimer);
+    watcherState.watcher.close();
+    libraryWatchers.delete(watcherKey);
+  }
+}
+
+async function readChangedProject(rootPath, projectPath) {
+  const repo = resolveProjectRepo(rootPath, projectPath);
+  if (!repo || !(await exists(projectPath))) {
+    return null;
+  }
+
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await readProject(projectPath, repo);
+    } catch (error) {
+      lastError = error;
+      await wait(250 * (attempt + 1));
+    }
+  }
+
+  throw lastError;
+}
+
+async function flushLibraryChanges(watcherState) {
+  const projectPaths = [...watcherState.changedProjectPaths];
+  watcherState.changedProjectPaths.clear();
+
+  for (const projectPath of projectPaths) {
+    try {
+      const project = await readChangedProject(watcherState.rootPath, projectPath);
+      if (!project) {
+        continue;
+      }
+
+      for (const [webContentsId, subscriber] of watcherState.subscribers) {
+        if (subscriber.isDestroyed()) {
+          watcherState.subscribers.delete(webContentsId);
+          continue;
+        }
+
+        subscriber.send("library:project-changed", {
+          rootPath: watcherState.rootPath,
+          projectPath,
+          project
+        });
+      }
+    } catch (error) {
+      console.warn(`Failed to refresh changed project: ${projectPath}`, error);
+    }
+  }
+}
+
+function scheduleLibraryChange(watcherState, changedPath) {
+  if (path.basename(changedPath).toLocaleLowerCase() !== "save-manifest.json") {
+    return;
+  }
+
+  const projectPath = path.dirname(path.resolve(watcherState.rootPath, changedPath));
+  if (!isPathInside(watcherState.rootPath, projectPath)) {
+    return;
+  }
+
+  watcherState.changedProjectPaths.add(projectPath);
+  clearTimeout(watcherState.flushTimer);
+  watcherState.flushTimer = setTimeout(() => {
+    watcherState.flushTimer = null;
+    void flushLibraryChanges(watcherState);
+  }, 800);
+}
+
+function subscribeToLibraryChanges(rootPath, subscriber) {
+  const resolvedRootPath = path.resolve(rootPath);
+  const watcherKey = getLibraryWatcherKey(resolvedRootPath);
+  removeWatcherSubscriber(subscriber.id);
+  let watcherState = libraryWatchers.get(watcherKey);
+
+  if (!watcherState) {
+    watcherState = {
+      rootPath: resolvedRootPath,
+      subscribers: new Map(),
+      changedProjectPaths: new Set(),
+      flushTimer: null,
+      watcher: null
+    };
+    watcherState.watcher = fsNative.watch(
+      resolvedRootPath,
+      { recursive: true },
+      (_eventType, fileName) => {
+        if (fileName) {
+          scheduleLibraryChange(watcherState, String(fileName));
+        }
+      }
+    );
+    watcherState.watcher.on("error", (error) => {
+      console.warn(`Library watcher stopped: ${resolvedRootPath}`, error);
+      clearTimeout(watcherState.flushTimer);
+      watcherState.watcher.close();
+      libraryWatchers.delete(watcherKey);
+    });
+    libraryWatchers.set(watcherKey, watcherState);
+  }
+
+  watcherState.subscribers.set(subscriber.id, subscriber);
+  subscriber.once("destroyed", () => removeWatcherSubscriber(subscriber.id));
+}
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -48,6 +194,35 @@ protocol.registerSchemesAsPrivileged([
     }
   }
 ]);
+
+function loadRendererWindow(win, query = {}) {
+  let hasRetriedDevLoad = false;
+
+  const load = () => {
+    if (isDev) {
+      const targetUrl = new URL("http://127.0.0.1:5173");
+      for (const [key, value] of Object.entries(query)) {
+        targetUrl.searchParams.set(key, value);
+      }
+      return win.loadURL(targetUrl.toString());
+    }
+
+    return win.loadFile(path.join(__dirname, "..", "dist", "index.html"), { query });
+  };
+
+  win.webContents.on("did-fail-load", () => {
+    if (!isDev || hasRetriedDevLoad) {
+      return;
+    }
+
+    hasRetriedDevLoad = true;
+    setTimeout(() => {
+      void load();
+    }, 1200);
+  });
+
+  void load();
+}
 
 function createMainWindow() {
   const win = new BrowserWindow({
@@ -63,25 +238,64 @@ function createMainWindow() {
     }
   });
 
-  let hasRetriedDevLoad = false;
-
-  win.webContents.on("did-fail-load", () => {
-    if (!isDev || hasRetriedDevLoad) {
-      return;
+  mainWindow = win;
+  win.on("closed", () => {
+    if (mainWindow === win) {
+      mainWindow = null;
     }
-
-    hasRetriedDevLoad = true;
-    setTimeout(() => {
-      win.loadURL("http://127.0.0.1:5173");
-    }, 1200);
   });
 
+  loadRendererWindow(win);
   if (isDev) {
-    win.loadURL("http://127.0.0.1:5173");
     win.webContents.openDevTools({ mode: "detach" });
-  } else {
-    win.loadFile(path.join(__dirname, "..", "dist", "index.html"));
   }
+}
+
+function createProjectWindow(rootPath, projectPath, projectTitle = "") {
+  const resolvedRootPath = path.resolve(rootPath);
+  const resolvedProjectPath = path.resolve(projectPath);
+  if (!isPathInside(resolvedRootPath, resolvedProjectPath)) {
+    return { ok: false, error: "项目不在当前根目录中。" };
+  }
+
+  const existingWindow = projectWindows.get(resolvedProjectPath);
+  if (existingWindow && !existingWindow.isDestroyed()) {
+    if (existingWindow.isMinimized()) {
+      existingWindow.restore();
+    }
+    existingWindow.show();
+    existingWindow.focus();
+    return { ok: true, reused: true };
+  }
+
+  const detailWindow = new BrowserWindow({
+    width: 1320,
+    height: 900,
+    minWidth: 980,
+    minHeight: 700,
+    title: projectTitle || "MakerWorld 项目详情",
+    backgroundColor: "#f6efe1",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+
+  projectWindows.set(resolvedProjectPath, detailWindow);
+  detailWindow.on("closed", () => {
+    if (projectWindows.get(resolvedProjectPath) === detailWindow) {
+      projectWindows.delete(resolvedProjectPath);
+    }
+  });
+
+  loadRendererWindow(detailWindow, {
+    window: "project",
+    rootPath: resolvedRootPath,
+    projectPath: resolvedProjectPath
+  });
+
+  return { ok: true, reused: false };
 }
 
 function showAboutDialog() {
@@ -680,15 +894,31 @@ async function buildInstanceItems(projectPath, metadata, manifest) {
         profileId: instance.profileId,
         title: instance.title || `实例 ${instance.id}`,
         machine: formatCompatibility(instance),
+        summaryText: stripHtmlTags(instance.summaryText || instance.summary || ""),
+        creator: instance.creator || null,
+        isDesigner: Boolean(instance.isDesigner),
+        isAuthorsChoice: Boolean(instance.isAuthorsChoice),
+        isOfficial: Boolean(instance.isOfficial),
         coverSrc: coverAsset?.src || instance.coverUrl || "",
         coverPath: coverAsset?.path || "",
         plateItems,
+        plateCount: asArray(instance.plates).length || plateItems.length,
         modelFiles,
         filesDirectoryPath: filesDir,
         materialCount: instance.materialCount ?? 0,
         downloadCount: instance.downloadCount ?? 0,
+        ratingCount: instance.ratingCount ?? 0,
+        ratingScoreTotal: instance.ratingScoreTotal ?? 0,
         predictionSeconds: instance.predictionSeconds ?? null,
-        weightGrams: instance.weightGrams ?? null
+        weightGrams: instance.weightGrams ?? null,
+        nozzleDiameter: instance.nozzleDiameter ?? null,
+        printSettings: instance.printSettings || {},
+        filaments: asArray(instance.filaments).map((filament) => ({
+          type: filament?.type || "",
+          color: filament?.color || "",
+          usedMeters: filament?.usedMeters || "",
+          usedGrams: filament?.usedGrams || ""
+        }))
       };
     })
   );
@@ -755,6 +985,7 @@ async function readProject(projectPath, repo, cachedProject = null) {
     summaryHtml: metadata?.model?.summaryHtml || "",
     summaryText: metadata?.model?.summaryText || "",
     sourceUrl: metadata?.sourceUrl || "",
+    customization: metadata?.model?.customization || null,
     coverPath: cover.coverPath,
     coverSrc: cover.coverSrc,
     coverUrl: cover.coverUrl,
@@ -1431,6 +1662,43 @@ async function removeDirectorySafely(targetPath) {
   }
 }
 
+ipcMain.handle("window:open-project", async (_event, rootPath, projectPath, projectTitle) => {
+  if (!rootPath || !projectPath) {
+    return { ok: false, error: "缺少项目窗口参数。" };
+  }
+
+  try {
+    const resolvedRootPath = path.resolve(rootPath);
+    const resolvedProjectPath = path.resolve(projectPath);
+    if (!isPathInside(resolvedRootPath, resolvedProjectPath)) {
+      return { ok: false, error: "项目不在当前根目录中。" };
+    }
+    if (!(await exists(resolvedProjectPath))) {
+      return { ok: false, error: "项目目录不存在。" };
+    }
+
+    return createProjectWindow(resolvedRootPath, resolvedProjectPath, projectTitle);
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle("queue:read", async () => {
+  try {
+    return { ok: true, entries: await readPrintQueueEntries() };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle("queue:write", async (_event, entries) => {
+  try {
+    return { ok: true, entries: await writePrintQueueEntries(entries) };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
 ipcMain.handle("dialog:pick-directory", async () => {
   const result = await dialog.showOpenDialog({
     properties: ["openDirectory", "createDirectory"]
@@ -1501,6 +1769,32 @@ ipcMain.handle("library:scan-root", async (_event, rootPath) => {
       error: error instanceof Error ? error.message : String(error)
     };
   }
+});
+
+ipcMain.handle("library:watch-root", async (event, rootPath) => {
+  if (!rootPath) {
+    return { ok: false, error: "缺少根目录。" };
+  }
+
+  try {
+    const resolvedRootPath = path.resolve(rootPath);
+    if (!(await exists(resolvedRootPath))) {
+      return { ok: false, error: "根目录不存在。" };
+    }
+
+    subscribeToLibraryChanges(resolvedRootPath, event.sender);
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+});
+
+ipcMain.handle("library:unwatch-root", (event) => {
+  removeWatcherSubscriber(event.sender.id);
+  return { ok: true };
 });
 
 ipcMain.handle("library:read-cache", async (_event, rootPath) => {

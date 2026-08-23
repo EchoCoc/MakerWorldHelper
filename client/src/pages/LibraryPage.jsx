@@ -2,16 +2,36 @@
 
 import { createPortal } from "react-dom";
 
-function getVisiblePageNumbers(currentPage, totalPages) {
-  const startPage = Math.max(1, currentPage - 2);
-  const endPage = Math.min(totalPages, startPage + 4);
-  const pages = [];
-
-  for (let page = Math.max(1, endPage - 4); page <= endPage; page += 1) {
-    pages.push(page);
+function getVisiblePageItems(currentPage, totalPages) {
+  if (totalPages <= 7) {
+    return Array.from({ length: totalPages }, (_, index) => index + 1);
   }
 
-  return pages;
+  const visiblePages = new Set([1, totalPages, currentPage - 1, currentPage, currentPage + 1]);
+
+  if (currentPage <= 4) {
+    [2, 3, 4, 5].forEach((page) => visiblePages.add(page));
+  }
+
+  if (currentPage >= totalPages - 3) {
+    [totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1].forEach((page) =>
+      visiblePages.add(page)
+    );
+  }
+
+  const pages = [...visiblePages]
+    .filter((page) => page >= 1 && page <= totalPages)
+    .sort((left, right) => left - right);
+  const items = [];
+
+  pages.forEach((page, index) => {
+    if (index > 0 && page - pages[index - 1] > 1) {
+      items.push(`ellipsis-${pages[index - 1]}-${page}`);
+    }
+    items.push(page);
+  });
+
+  return items;
 }
 
 function getRepoBadge(kind) {
@@ -32,6 +52,36 @@ function getRepoBadge(kind) {
 
 function getSafeHtml(project) {
   return project.summaryHtml || `<p>${project.summaryText || "暂无摘要。"}</p>`;
+}
+
+function formatPrintDuration(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value <= 0) {
+    return "-";
+  }
+
+  const hours = value / 3600;
+  return `${Number(hours.toFixed(hours >= 10 ? 1 : 2))} 小时`;
+}
+
+function formatPrintWeight(grams) {
+  const value = Number(grams);
+  return Number.isFinite(value) && value > 0 ? `${Math.round(value)} g` : "-";
+}
+
+function formatInstanceRating(instance) {
+  const count = Number(instance?.ratingCount);
+  const total = Number(instance?.ratingScoreTotal);
+  if (!Number.isFinite(count) || count <= 0 || !Number.isFinite(total)) {
+    return "-";
+  }
+
+  return (total / count).toFixed(1);
+}
+
+function getFilamentColor(value) {
+  const color = String(value || "").trim();
+  return /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(color) ? color : "#d8d0c5";
 }
 
 const TAG_SWATCHES = [
@@ -276,7 +326,7 @@ function ProjectListView({
   onPageChange,
   onSortChange
 }) {
-  const visiblePages = getVisiblePageNumbers(currentPage, totalPages);
+  const visiblePageItems = getVisiblePageItems(currentPage, totalPages);
 
   return (
     <section className="panel libraryPanel">
@@ -339,34 +389,64 @@ function ProjectListView({
 
       {totalPages > 1 ? (
         <div className="paginationBar">
-          <button
-            className="paginationButton"
-            type="button"
-            onClick={() => onPageChange(currentPage - 1)}
-            disabled={currentPage === 1}
-          >
-            上一页
-          </button>
-          <div className="paginationPages">
-            {visiblePages.map((pageNumber) => (
-              <button
-                key={pageNumber}
-                className={`paginationButton ${pageNumber === currentPage ? "active" : ""}`}
-                type="button"
-                onClick={() => onPageChange(pageNumber)}
-              >
-                {pageNumber}
-              </button>
-            ))}
+          <div className="paginationSummary" aria-live="polite">
+            <strong>第 {currentPage} 页</strong>
+            <span>共 {totalPages} 页 · {totalProjectCount} 个项目</span>
           </div>
-          <button
-            className="paginationButton"
-            type="button"
-            onClick={() => onPageChange(currentPage + 1)}
-            disabled={currentPage === totalPages}
-          >
-            下一页
-          </button>
+          <div className="paginationControls">
+            <button
+              className="paginationButton paginationEdgeButton"
+              type="button"
+              onClick={() => onPageChange(1)}
+              disabled={currentPage === 1}
+            >
+              首页
+            </button>
+            <button
+              className="paginationButton paginationEdgeButton"
+              type="button"
+              onClick={() => onPageChange(currentPage - 1)}
+              disabled={currentPage === 1}
+            >
+              上一页
+            </button>
+            <div className="paginationPages" aria-label="项目列表分页">
+              {visiblePageItems.map((item) =>
+                typeof item === "string" ? (
+                  <span key={item} className="paginationEllipsis" aria-hidden="true">
+                    …
+                  </span>
+                ) : (
+                  <button
+                    key={item}
+                    className={`paginationButton ${item === currentPage ? "active" : ""}`}
+                    type="button"
+                    aria-label={`第 ${item} 页`}
+                    aria-current={item === currentPage ? "page" : undefined}
+                    onClick={() => onPageChange(item)}
+                  >
+                    {item}
+                  </button>
+                )
+              )}
+            </div>
+            <button
+              className="paginationButton paginationEdgeButton"
+              type="button"
+              onClick={() => onPageChange(currentPage + 1)}
+              disabled={currentPage === totalPages}
+            >
+              下一页
+            </button>
+            <button
+              className="paginationButton paginationEdgeButton"
+              type="button"
+              onClick={() => onPageChange(totalPages)}
+              disabled={currentPage === totalPages}
+            >
+              末页
+            </button>
+          </div>
         </div>
       ) : null}
     </section>
@@ -595,6 +675,7 @@ function InstanceFileAction({ files, onOpenPath }) {
 function ProjectDetailView({
   selectedProject,
   onBack,
+  backLabel = "返回项目列表",
   onOpenExternal,
   onOpenPath,
   onMoveProject,
@@ -609,7 +690,9 @@ function ProjectDetailView({
   const detailPictures = selectedProject.pictureItems || [];
   const [detailPictureIndex, setDetailPictureIndex] = useState(0);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [openInstancePreviewId, setOpenInstancePreviewId] = useState(null);
   const menuRef = useRef(null);
+  const instancePreviewRef = useRef(null);
   const thumbStripRef = useRef(null);
   const thumbButtonRefs = useRef([]);
   const carouselArrowIcon = (
@@ -624,7 +707,34 @@ function ProjectDetailView({
 
   useEffect(() => {
     setMenuOpen(false);
+    setOpenInstancePreviewId(null);
   }, [selectedProject.id]);
+
+  useEffect(() => {
+    if (openInstancePreviewId == null) {
+      return undefined;
+    }
+
+    function handlePointerDown(event) {
+      if (!instancePreviewRef.current?.contains(event.target)) {
+        setOpenInstancePreviewId(null);
+      }
+    }
+
+    function handleEscape(event) {
+      if (event.key === "Escape") {
+        setOpenInstancePreviewId(null);
+      }
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleEscape);
+
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [openInstancePreviewId]);
 
   useEffect(() => {
     if (!menuOpen) {
@@ -677,6 +787,24 @@ function ProjectDetailView({
   const activeDetailPicture = detailPictures[detailPictureIndex] || null;
   const documentItems = selectedProject.documentItems || [];
   const materialSections = selectedProject.materialSections || [];
+  const customization = selectedProject.customization || null;
+  const customizationOptions = Array.isArray(customization?.options)
+    ? customization.options
+    : [];
+  const visibleCustomizationOptions = customizationOptions.length > 0
+    ? customizationOptions
+    : customization?.available
+      ? [
+          {
+            id: "project-customization",
+            name: "MakerWorld 参数定制",
+            type: "在原项目中选择定制方案",
+            thumbnailUrl: "",
+            customizeUrl: selectedProject.sourceUrl
+          }
+        ]
+      : [];
+  const hasCustomization = visibleCustomizationOptions.length > 0;
   const hasDocuments = documentItems.length > 0;
   const hasMaterials = materialSections.length > 0;
 
@@ -684,7 +812,7 @@ function ProjectDetailView({
     <section className="panel detailPanel fullDetailPanel">
       <div className="detailTopbar">
         <button className="ghostButton backButton" onClick={onBack}>
-          返回项目列表
+          {backLabel}
         </button>
         <div className="detailMenu" ref={menuRef}>
           <button
@@ -905,28 +1033,85 @@ function ProjectDetailView({
                     }
                   }}
                 >
-                  <div className="instanceCoverWrap">
-                    <img
-                      className="instanceCover"
-                      src={instance.coverSrc || selectedProject.coverSrc || selectedProject.coverUrl}
-                      alt={instance.title}
-                      loading="lazy"
-                      decoding="async"
-                    />
-                    {instance.plateItems?.length > 0 ? (
-                      <div className="platePreviewPopover coverPlatePreview">
-                        <div className="platePreviewTitle">Plate 缩略图</div>
-                        <div className="platePreviewGrid">
-                          {instance.plateItems.slice(0, 3).map((plate) => (
-                            <img
-                              key={plate.path}
-                              src={plate.src}
-                              alt={plate.fileName}
-                              loading="lazy"
-                              decoding="async"
-                            />
-                          ))}
+                  <div
+                    className="instanceCoverWrap"
+                    ref={openInstancePreviewId === instance.id ? instancePreviewRef : null}
+                  >
+                    <button
+                      className="instanceCoverButton"
+                      type="button"
+                      aria-label={`查看 ${instance.title} 的打印详情`}
+                      aria-expanded={openInstancePreviewId === instance.id}
+                      onClick={() =>
+                        setOpenInstancePreviewId((current) => current === instance.id ? null : instance.id)
+                      }
+                    >
+                      <img
+                        className="instanceCover"
+                        src={instance.coverSrc || selectedProject.coverSrc || selectedProject.coverUrl}
+                        alt={instance.title}
+                        loading="lazy"
+                        decoding="async"
+                      />
+                    </button>
+                    {openInstancePreviewId === instance.id ? (
+                      <div className="platePreviewPopover coverPlatePreview open">
+                        <div className="instancePreviewHeader">
+                          <div>
+                            <div className="instancePreviewTitle">{instance.title}</div>
+                            {instance.creator?.name ? (
+                              <div className="instancePreviewCreator">{instance.creator.name}</div>
+                            ) : null}
+                          </div>
+                          {instance.isDesigner ? <span className="designerBadge">设计师</span> : null}
                         </div>
+                        {instance.summaryText ? (
+                          <div className="instancePreviewDescription">
+                            <div className="instancePreviewSectionLabel">配置说明</div>
+                            <div className="instancePreviewSummary">{instance.summaryText}</div>
+                          </div>
+                        ) : null}
+                        <div className="instancePreviewStats">
+                          <span><b>{instance.plateCount || instance.plateItems?.length || 0}</b> 盘</span>
+                          <span><b>{formatPrintDuration(instance.predictionSeconds)}</b></span>
+                          <span><b>{instance.nozzleDiameter ? `${instance.nozzleDiameter} mm` : "-"}</b> 喷嘴</span>
+                          <span><b>{formatPrintWeight(instance.weightGrams)}</b></span>
+                        </div>
+                        {instance.printSettings?.layerHeight ||
+                        instance.printSettings?.wallLoops ||
+                        instance.printSettings?.sparseInfillDensity ? (
+                          <div className="instancePrintSettings">
+                            {instance.printSettings.layerHeight ? <span>层高 {instance.printSettings.layerHeight} mm</span> : null}
+                            {instance.printSettings.wallLoops ? <span>墙数 {instance.printSettings.wallLoops}</span> : null}
+                            {instance.printSettings.sparseInfillDensity ? <span>填充 {instance.printSettings.sparseInfillDensity}</span> : null}
+                          </div>
+                        ) : null}
+                        {instance.filaments?.length > 0 ? (
+                          <div className="instanceFilaments">
+                            {instance.filaments.map((filament, index) => (
+                              <span className="filamentChip" key={`${filament.type}-${filament.color}-${index}`}>
+                                <i style={{ backgroundColor: getFilamentColor(filament.color) }} />
+                                {filament.type || "耗材"}{filament.usedGrams ? ` ${filament.usedGrams} g` : ""}
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                        {instance.plateItems?.length > 0 ? (
+                          <>
+                            <div className="platePreviewTitle">Plate 缩略图</div>
+                            <div className="platePreviewGrid">
+                              {instance.plateItems.slice(0, 6).map((plate) => (
+                                <img
+                                  key={plate.path}
+                                  src={plate.src}
+                                  alt={plate.fileName}
+                                  loading="lazy"
+                                  decoding="async"
+                                />
+                              ))}
+                            </div>
+                          </>
+                        ) : null}
                       </div>
                     ) : null}
                   </div>
@@ -934,17 +1119,32 @@ function ProjectDetailView({
                     <div className="instanceTopline">
                       <div className="instanceInfo">
                         <div className="instanceTitle">{instance.title}</div>
-                        <div className="projectMeta" title={instance.machine}>
-                          {instance.machine}
+                        <div className="instanceQuickFacts">
+                          {instance.isDesigner ? <span className="designerBadge">设计师</span> : null}
+                          <span title="打印时间">
+                            <svg viewBox="0 0 20 20" aria-hidden="true">
+                              <circle cx="10" cy="10" r="7" />
+                              <path d="M10 6v4l2.7 1.7" />
+                            </svg>
+                            {formatPrintDuration(instance.predictionSeconds)}
+                          </span>
+                          <span title="打印盘数">
+                            <svg viewBox="0 0 20 20" aria-hidden="true">
+                              <rect x="4" y="3.5" width="12" height="13" rx="1.5" />
+                              <path d="M9 4v12" />
+                            </svg>
+                            {instance.plateCount || instance.plateItems?.length || 0} 盘
+                          </span>
+                          <span className="instanceRating" title="评分">
+                            <svg viewBox="0 0 20 20" aria-hidden="true">
+                              <path d="m10 2.8 2.1 4.3 4.8.7-3.5 3.4.8 4.8-4.2-2.3L5.8 16l.8-4.8-3.5-3.4 4.8-.7L10 2.8Z" />
+                            </svg>
+                            {formatInstanceRating(instance)}
+                            {instance.ratingCount > 0 ? <small>({instance.ratingCount})</small> : null}
+                          </span>
                         </div>
                       </div>
                       <InstanceFileAction files={instance.modelFiles} onOpenPath={onOpenPath} />
-                    </div>
-                    <div className="instanceMeta">
-                      <span className="miniChip">耗材 {instance.materialCount}</span>
-                      <span className="miniChip">下载 {instance.downloadCount}</span>
-                      <span className="miniChip">Plate {instance.plateItems?.length || 0}</span>
-                      <span className="miniChip">文件 {instance.modelFiles?.length || 0}</span>
                     </div>
                   </div>
                 </article>
@@ -953,6 +1153,50 @@ function ProjectDetailView({
           </div>
         </div>
       </div>
+
+      {hasCustomization ? (
+        <section className="detailSection detailCompactSection">
+          <div className="panelHeader">
+            <h3>
+              参数定制
+              {customization?.count != null ? (
+                <span className="panelCount">{customization.count}</span>
+              ) : null}
+            </h3>
+          </div>
+          <div className="customizationOptionList">
+            {visibleCustomizationOptions.map((option, index) => {
+              const targetUrl = option.customizeUrl || selectedProject.sourceUrl;
+              return (
+                <button
+                  key={`${option.id || option.unikey || option.name}-${index}`}
+                  className="customizationOptionCard"
+                  type="button"
+                  onClick={() => targetUrl && onOpenExternal(targetUrl)}
+                  disabled={!targetUrl}
+                >
+                  {option.thumbnailUrl ? (
+                    <img
+                      className="customizationOptionImage"
+                      src={option.thumbnailUrl}
+                      alt=""
+                      loading="lazy"
+                      decoding="async"
+                    />
+                  ) : (
+                    <span className="customizationOptionIcon" aria-hidden="true">&lt;/&gt;</span>
+                  )}
+                  <span className="customizationOptionBody">
+                    <span className="customizationOptionName">{option.name || option.modelName}</span>
+                    <span className="customizationOptionType">{option.type || "参数化模型"}</span>
+                  </span>
+                  <span className="customizationOptionAction">打开定制</span>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      ) : null}
 
       {hasDocuments ? (
         <section className="detailSection detailCompactSection">
@@ -1035,12 +1279,14 @@ export function LibraryPage({
   searchText,
   sortKey,
   status,
+  isProjectWindow = false,
   canPickRoot = true,
   onPickRoot,
   onImport3mf,
   onRefresh,
   onRepoChange,
   onProjectChange,
+  onCloseProjectWindow,
   onPageChange,
   onSearchChange,
   onSortChange,
@@ -1059,6 +1305,41 @@ export function LibraryPage({
   onDeleteProject
 }) {
   const isDetailMode = Boolean(selectedProject);
+  const detailView = isDetailMode ? (
+    <ProjectDetailView
+      selectedProject={selectedProject}
+      onBack={isProjectWindow ? onCloseProjectWindow : () => onProjectChange(null)}
+      backLabel={isProjectWindow ? "关闭详情窗口" : "返回项目列表"}
+      onOpenExternal={onOpenExternal}
+      onOpenPath={onOpenPath}
+      onMoveProject={onMoveProject}
+      onEditProjectTags={onEditProjectTags}
+      onQueueProject={onQueueProject}
+      onMarkPrintCompleted={onMarkPrintCompleted}
+      onMarkPrintIncomplete={onMarkPrintIncomplete}
+      onRemoveQueuedProject={onRemoveQueuedProject}
+      onRefreshProject={onRefreshProject}
+      onDeleteProject={onDeleteProject}
+    />
+  ) : null;
+
+  if (isProjectWindow) {
+    const projectOpenFailed = /(失败|无法|缺少|不存在|移动|删除)/.test(status);
+
+    return (
+      <main className="shell projectWindowShell">
+        {detailView || (
+          <section className="panel projectWindowLoading">
+            <h2>{projectOpenFailed ? "无法打开项目" : "正在打开项目"}</h2>
+            <p className="subtle">{status}</p>
+            <button className="ghostButton" type="button" onClick={onCloseProjectWindow}>
+              关闭窗口
+            </button>
+          </section>
+        )}
+      </main>
+    );
+  }
 
   return (
     <main className="shell">
@@ -1067,7 +1348,7 @@ export function LibraryPage({
           <div>
             <p className="eyebrow">MakerWorld Helper CN Desktop</p>
             <h1>本地资源库客户端</h1>
-            <p className="subtle">首页浏览仓库和项目，点击卡片进入项目详情页。</p>
+            <p className="subtle">首页浏览仓库和项目，点击卡片在独立窗口中查看详情。</p>
           </div>
           <div className="heroToolbar">
             <div className="searchBar">
@@ -1153,20 +1434,7 @@ export function LibraryPage({
 
         <section className="content singleContent">
           {isDetailMode ? (
-            <ProjectDetailView
-              selectedProject={selectedProject}
-              onBack={() => onProjectChange(null)}
-              onOpenExternal={onOpenExternal}
-              onOpenPath={onOpenPath}
-              onMoveProject={onMoveProject}
-              onEditProjectTags={onEditProjectTags}
-              onQueueProject={onQueueProject}
-              onMarkPrintCompleted={onMarkPrintCompleted}
-              onMarkPrintIncomplete={onMarkPrintIncomplete}
-              onRemoveQueuedProject={onRemoveQueuedProject}
-              onRefreshProject={onRefreshProject}
-              onDeleteProject={onDeleteProject}
-            />
+            detailView
           ) : (
             <ProjectListView
               projects={projects}
