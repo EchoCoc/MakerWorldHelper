@@ -38,6 +38,7 @@ const INSTANCE_COVER_CANDIDATES = [
 ];
 const INVALID_COMPATIBILITY_CODES = new Set(["O1D", "O1S", "N1"]);
 const projectWindows = new Map();
+const projectWindowSnapshots = new Map();
 const libraryWatchers = new Map();
 let mainWindow = null;
 
@@ -251,7 +252,7 @@ function createMainWindow() {
   }
 }
 
-function createProjectWindow(rootPath, projectPath, projectTitle = "") {
+function createProjectWindow(rootPath, projectPath, projectTitle = "", projectSnapshot = null) {
   const resolvedRootPath = path.resolve(rootPath);
   const resolvedProjectPath = path.resolve(projectPath);
   if (!isPathInside(resolvedRootPath, resolvedProjectPath)) {
@@ -260,6 +261,10 @@ function createProjectWindow(rootPath, projectPath, projectTitle = "") {
 
   const existingWindow = projectWindows.get(resolvedProjectPath);
   if (existingWindow && !existingWindow.isDestroyed()) {
+    if (projectSnapshot) {
+      projectWindowSnapshots.set(resolvedProjectPath, projectSnapshot);
+      existingWindow.webContents.send("window:project-snapshot", projectSnapshot);
+    }
     if (existingWindow.isMinimized()) {
       existingWindow.restore();
     }
@@ -283,9 +288,13 @@ function createProjectWindow(rootPath, projectPath, projectTitle = "") {
   });
 
   projectWindows.set(resolvedProjectPath, detailWindow);
+  if (projectSnapshot) {
+    projectWindowSnapshots.set(resolvedProjectPath, projectSnapshot);
+  }
   detailWindow.on("closed", () => {
     if (projectWindows.get(resolvedProjectPath) === detailWindow) {
       projectWindows.delete(resolvedProjectPath);
+      projectWindowSnapshots.delete(resolvedProjectPath);
     }
   });
 
@@ -379,6 +388,23 @@ function asArray(value) {
   }
 
   return value == null ? [] : [value];
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+
+  async function runWorker() {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+    }
+  }
+
+  const workerCount = Math.min(Math.max(1, limit), items.length);
+  await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+  return results;
 }
 
 function normalizeTagList(value) {
@@ -523,21 +549,24 @@ async function writeLibraryCache(rootPath, data) {
   }
 
   const cachePath = getLibraryCachePath(rootPath);
+  const temporaryCachePath = `${cachePath}.${process.pid}.tmp`;
   await fs.mkdir(path.dirname(cachePath), { recursive: true });
-  await fs.writeFile(
-    cachePath,
-    JSON.stringify(
-      {
+  try {
+    await fs.writeFile(
+      temporaryCachePath,
+      JSON.stringify({
         version: LIBRARY_CACHE_VERSION,
         rootPath,
         updatedAt: new Date().toISOString(),
         data
-      },
-      null,
-      2
-    ),
-    "utf8"
-  );
+      }),
+      "utf8"
+    );
+    await fs.rename(temporaryCachePath, cachePath);
+  } catch (error) {
+    await fs.rm(temporaryCachePath, { force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 function getModelFileType(fileName) {
@@ -833,6 +862,10 @@ async function buildInstanceItems(projectPath, metadata, manifest) {
   const instances = await Promise.all(
     asArray(metadata?.instances).map(async (instance) => {
       const instanceDir = getInstanceDirectoryName(instance);
+      const originalTitle = instance.isCustomized
+        ? String(instance.title || "").replace(/^定制\s*[·・]?\s*/, "导入 · ")
+        : instance.title;
+      const instanceTitle = String(instance.alias || "").trim() || originalTitle;
       const filesDir = path.join(projectPath, "instances", instanceDir, "files");
       const coverAsset = await getFirstExistingAssetDescriptor(
         INSTANCE_COVER_CANDIDATES.map((fileName) => path.join(projectPath, "instances", instanceDir, fileName))
@@ -892,10 +925,14 @@ async function buildInstanceItems(projectPath, metadata, manifest) {
       return {
         id: instance.id,
         profileId: instance.profileId,
-        title: instance.title || `实例 ${instance.id}`,
+        title: instanceTitle || `实例 ${instance.id}`,
+        originalTitle: originalTitle || `实例 ${instance.id}`,
+        alias: String(instance.alias || "").trim(),
         machine: formatCompatibility(instance),
         summaryText: stripHtmlTags(instance.summaryText || instance.summary || ""),
         creator: instance.creator || null,
+        isImported: Boolean(instance.isImported || instance.isCustomized),
+        isFavorite: Boolean(instance.isFavorite),
         isDesigner: Boolean(instance.isDesigner),
         isAuthorsChoice: Boolean(instance.isAuthorsChoice),
         isOfficial: Boolean(instance.isOfficial),
@@ -926,7 +963,7 @@ async function buildInstanceItems(projectPath, metadata, manifest) {
   return instances;
 }
 
-async function getProjectFingerprint(projectPath) {
+async function getProjectFingerprints(projectPath) {
   const fingerprintParts = await Promise.all([
     getPathStatSignature(path.join(projectPath, "metadata.json")),
     getPathStatSignature(path.join(projectPath, "save-manifest.json")),
@@ -935,7 +972,27 @@ async function getProjectFingerprint(projectPath) {
     getPathStatSignature(path.join(projectPath, "model", "documents"))
   ]);
 
+  return {
+    quickFingerprint: fingerprintParts.slice(0, 2).join("|"),
+    fingerprint: fingerprintParts.join("|")
+  };
+}
+
+async function getProjectQuickFingerprint(projectPath) {
+  const fingerprintParts = await Promise.all([
+    getPathStatSignature(path.join(projectPath, "metadata.json")),
+    getPathStatSignature(path.join(projectPath, "save-manifest.json"))
+  ]);
+
   return fingerprintParts.join("|");
+}
+
+function getCachedQuickFingerprint(project) {
+  if (project?.quickFingerprint) {
+    return project.quickFingerprint;
+  }
+
+  return String(project?.cacheFingerprint || "").split("|").slice(0, 2).join("|");
 }
 
 async function readProject(projectPath, repo, cachedProject = null) {
@@ -946,7 +1003,7 @@ async function readProject(projectPath, repo, cachedProject = null) {
 
   const projectStats = await fs.stat(projectPath);
   const addedAt = projectStats.birthtime?.toISOString?.() || projectStats.ctime?.toISOString?.() || "";
-  const fingerprint = await getProjectFingerprint(projectPath);
+  const { fingerprint, quickFingerprint } = await getProjectFingerprints(projectPath);
   if (cachedProject?.cacheFingerprint === fingerprint) {
     return {
       ...cachedProject,
@@ -955,7 +1012,8 @@ async function readProject(projectPath, repo, cachedProject = null) {
       repoLabel: repo.name,
       repoKind: repo.kind === "default" ? "default" : "custom",
       projectPath,
-      addedAt
+      addedAt,
+      quickFingerprint
     };
   }
 
@@ -994,9 +1052,160 @@ async function readProject(projectPath, repo, cachedProject = null) {
     instanceItems,
     materialSections,
     cacheFingerprint: fingerprint,
+    quickFingerprint,
     manifest,
     metadata
   };
+}
+
+async function discoverProjectLocations(rootPath) {
+  const dirents = await fs.readdir(rootPath, { withFileTypes: true });
+  const rootRepo = {
+    id: "root",
+    name: "当前目录",
+    kind: "default",
+    path: rootPath,
+    projectCount: 0
+  };
+
+  const discoveredEntries = await mapWithConcurrency(
+    dirents.filter((dirent) => dirent.isDirectory()),
+    12,
+    async (dirent) => {
+      const fullPath = path.join(rootPath, dirent.name);
+      if (await exists(path.join(fullPath, "metadata.json"))) {
+        return { type: "root-project", repo: rootRepo, projectPath: fullPath };
+      }
+
+      const repo = {
+        id: dirent.name,
+        name: dirent.name,
+        kind: "custom",
+        path: fullPath,
+        projectCount: 0
+      };
+      let subDirents = [];
+      try {
+        subDirents = await fs.readdir(fullPath, { withFileTypes: true });
+      } catch {
+        return null;
+      }
+
+      const projectPaths = (
+        await mapWithConcurrency(
+          subDirents.filter((subDirent) => subDirent.isDirectory()),
+          12,
+          async (subDirent) => {
+            const projectPath = path.join(fullPath, subDirent.name);
+            return (await exists(path.join(projectPath, "metadata.json"))) ? projectPath : null;
+          }
+        )
+      ).filter(Boolean);
+      const markerExists = await hasRepoMarker(fullPath);
+      if (projectPaths.length === 0 && !markerExists) {
+        return null;
+      }
+
+      repo.projectCount = projectPaths.length;
+      if (projectPaths.length > 0 && !markerExists) {
+        await ensureRepoMarker(fullPath, repo.name);
+      }
+
+      return { type: "repo", repo, projectPaths };
+    }
+  );
+
+  const repositories = [];
+  const locations = [];
+  for (const entry of discoveredEntries) {
+    if (!entry) {
+      continue;
+    }
+
+    if (entry.type === "root-project") {
+      rootRepo.projectCount += 1;
+      locations.push({ repo: rootRepo, projectPath: entry.projectPath });
+      continue;
+    }
+
+    repositories.push(entry.repo);
+    locations.push(...entry.projectPaths.map((projectPath) => ({ repo: entry.repo, projectPath })));
+  }
+
+  if (rootRepo.projectCount > 0) {
+    repositories.unshift(rootRepo);
+  }
+
+  return { repositories, locations };
+}
+
+async function reconcileRootDirectory(rootPath) {
+  const cachedPayload = await readLibraryCache(rootPath);
+  if (!cachedPayload?.data) {
+    const data = await scanRootDirectory(rootPath);
+    return {
+      data,
+      checkedCount: data.projects.length,
+      changedCount: data.projects.length,
+      fullScan: true
+    };
+  }
+
+  const cachedProjects = cachedPayload.data.projects || [];
+  const cachedProjectsByPath = new Map(
+    cachedProjects.map((project) => [project.projectPath, project])
+  );
+  const { repositories, locations } = await discoverProjectLocations(rootPath);
+  let changedCount = 0;
+  let cacheNeedsWrite = locations.length !== cachedProjects.length;
+
+  const projects = (
+    await mapWithConcurrency(locations, 12, async ({ repo, projectPath }) => {
+      const cachedProject = cachedProjectsByPath.get(projectPath);
+      const quickFingerprint = await getProjectQuickFingerprint(projectPath);
+      if (cachedProject && getCachedQuickFingerprint(cachedProject) === quickFingerprint) {
+        if (!cachedProject.quickFingerprint) {
+          cacheNeedsWrite = true;
+        }
+        return {
+          ...cachedProject,
+          id: `${repo.id}/${path.basename(projectPath)}`,
+          repoId: repo.id,
+          repoLabel: repo.name,
+          repoKind: repo.kind === "default" ? "default" : "custom",
+          projectPath,
+          quickFingerprint
+        };
+      }
+
+      changedCount += 1;
+      cacheNeedsWrite = true;
+      return readProject(projectPath, repo, null);
+    })
+  ).filter(Boolean);
+
+  const currentProjectPaths = new Set(locations.map((location) => location.projectPath));
+  changedCount += cachedProjects.filter((project) => !currentProjectPaths.has(project.projectPath)).length;
+
+  const data = {
+    repositories: [
+      {
+        id: "all",
+        name: "全部项目",
+        kind: "overview",
+        path: rootPath,
+        projectCount: projects.length
+      },
+      ...repositories
+    ],
+    projects
+  };
+
+  if (cacheNeedsWrite) {
+    await writeLibraryCache(rootPath, data);
+  }
+
+  return { data, checkedCount: locations.length, changedCount, fullScan: false };
 }
 
 async function scanRootDirectory(rootPath) {
@@ -1014,10 +1223,11 @@ async function scanRootDirectory(rootPath) {
     projectCount: 0
   };
 
-  const scannedEntries = await Promise.all(
-    dirents
-      .filter((dirent) => dirent.isDirectory())
-      .map(async (dirent) => {
+  const rootDirectories = dirents.filter((dirent) => dirent.isDirectory());
+  const scannedEntries = await mapWithConcurrency(
+    rootDirectories,
+    8,
+    async (dirent) => {
         const fullPath = path.join(rootPath, dirent.name);
         const directProject = await readProject(fullPath, rootRepo, cachedProjectsByPath.get(fullPath));
         if (directProject) {
@@ -1033,14 +1243,15 @@ async function scanRootDirectory(rootPath) {
         };
 
         const subDirents = await fs.readdir(fullPath, { withFileTypes: true });
+        const repoDirectories = subDirents.filter((subDirent) => subDirent.isDirectory());
         const repoProjects = (
-          await Promise.all(
-            subDirents
-              .filter((subDirent) => subDirent.isDirectory())
-              .map((subDirent) => {
+          await mapWithConcurrency(
+            repoDirectories,
+            6,
+            (subDirent) => {
                 const projectPath = path.join(fullPath, subDirent.name);
                 return readProject(projectPath, repo, cachedProjectsByPath.get(projectPath));
-              })
+              }
           )
         ).filter(Boolean);
 
@@ -1056,7 +1267,7 @@ async function scanRootDirectory(rootPath) {
         }
 
         return { type: "repo", repo, projects: repoProjects };
-      })
+      }
   );
 
   const repositories = [];
@@ -1589,6 +1800,174 @@ async function import3mfProjects(rootPath, targetDirectory, filePaths) {
   return { imported, failed };
 }
 
+async function importCustomized3mfFile(projectPath, filePath, metadata, manifest) {
+  const fileBuffer = await fs.readFile(filePath);
+  const fileHash = crypto.createHash("sha1").update(fileBuffer).digest("hex");
+  const instanceId = `custom-${fileHash.slice(0, 12)}`;
+
+  if (asArray(metadata?.instances).some((instance) => instance?.id === instanceId)) {
+    return { skipped: true, filePath, instanceId };
+  }
+
+  const zip = new AdmZip(fileBuffer);
+  const modelMetadata = parse3mfModelMetadata(zip);
+  const projectSettings = parseProjectSettings(zip);
+  const fileBaseName = path.basename(filePath, path.extname(filePath));
+  const rawTitle = String(projectSettings?.print_settings_id || fileBaseName).trim() || fileBaseName;
+  const instanceTitle = /^(?:导入|定制)\s*[·・]/.test(rawTitle)
+    ? rawTitle.replace(/^定制/, "导入")
+    : `导入 · ${rawTitle}`;
+  const importedAt = new Date().toISOString();
+  const instance = {
+    id: instanceId,
+    profileId: instanceId,
+    title: instanceTitle,
+    summary: decodeHtmlEntities(modelMetadata.Description || "").trim(),
+    creator: {
+      name: decodeHtmlEntities(modelMetadata.Designer || "").trim() || "本地定制"
+    },
+    createdAt: importedAt,
+    updatedAt: importedAt,
+    publishTime: importedAt,
+    downloadCount: 0,
+    printCount: 0,
+    ratingCount: 0,
+    ratingScoreTotal: 0,
+    score: 0,
+    hasZipStl: false,
+    appCanPrint: true,
+    isImported: true,
+    importSource: "customization-result",
+    materialCount: 0,
+    materialColorCount: 0,
+    needAms: false,
+    predictionSeconds: null,
+    weightGrams: null,
+    filaments: [],
+    plates: []
+  };
+  const machineNames = [
+    projectSettings?.printer_model,
+    ...asArray(projectSettings?.print_compatible_printers),
+    ...asArray(projectSettings?.upward_compatible_machine)
+  ];
+  const compatibilityPayload = buildCompatibilityPayload(machineNames);
+  const filaments = buildFilamentList(projectSettings);
+  instance.compatibility = compatibilityPayload.compatibility;
+  instance.compatibilityText = compatibilityPayload.compatibilityText;
+  instance.otherCompatibility = compatibilityPayload.otherCompatibility;
+  instance.filaments = filaments;
+  instance.materialCount = filaments.length;
+  instance.materialColorCount = filaments.filter((item) => item.color).length;
+  instance.needAms = filaments.length > 1;
+
+  const instanceDirectoryName = getInstanceDirectoryName(instance);
+  const instanceBasePath = path.join(projectPath, "instances", instanceDirectoryName);
+  const filesDirectory = path.join(instanceBasePath, "files");
+  const platesDirectory = path.join(instanceBasePath, "plates");
+  const coverEntryName = [
+    "Auxiliaries/.thumbnails/thumbnail_middle.png",
+    "Auxiliaries/.thumbnails/thumbnail_3mf.png",
+    "Auxiliaries/.thumbnails/thumbnail_small.png"
+  ].find((entryName) => zip.getEntry(entryName)) ||
+    getZipEntries(zip, (entryName) => entryName.startsWith("Auxiliaries/Model Pictures/"))[0] ||
+    getZipEntries(zip, (entryName) => /^Metadata\/(top|pick)_\d+\.(png|jpg|jpeg|webp)$/i.test(entryName))[0];
+  const plateEntryNames = sortPlateEntryNames(
+    getZipEntries(zip, (entryName) => /^Metadata\/plate_\d+\.(png|jpg|jpeg|webp)$/i.test(entryName))
+  );
+  const extraPlatePreviewEntryNames = sortIndexedImageEntryNames(
+    getZipEntries(
+      zip,
+      (entryName) =>
+        /^Metadata\/plate_\d+_small\.(png|jpg|jpeg|webp)$/i.test(entryName) ||
+        /^Metadata\/plate_no_light_\d+\.(png|jpg|jpeg|webp)$/i.test(entryName)
+    )
+  );
+
+  await fs.mkdir(filesDirectory, { recursive: true });
+  await fs.mkdir(platesDirectory, { recursive: true });
+  await fs.writeFile(path.join(filesDirectory, path.basename(filePath)), fileBuffer);
+
+  if (coverEntryName) {
+    const coverExtension = path.extname(coverEntryName).toLowerCase() || ".png";
+    await copyZipEntryToFile(zip, coverEntryName, path.join(instanceBasePath, `instance-cover${coverExtension}`));
+  }
+
+  const manifestPlates = [];
+  for (const entryName of plateEntryNames) {
+    const plateFileName = path.basename(entryName);
+    await copyZipEntryToFile(zip, entryName, path.join(platesDirectory, plateFileName));
+    const plateMatch = entryName.match(/plate_(\d+)/i);
+    const plateIndex = plateMatch ? Number.parseInt(plateMatch[1], 10) : manifestPlates.length + 1;
+    manifestPlates.push({ instanceId, plateIndex, fileName: plateFileName });
+    instance.plates.push({ index: plateIndex, name: plateFileName });
+  }
+
+  const manifestPlatePreviews = [];
+  for (const entryName of extraPlatePreviewEntryNames) {
+    const previewFileName = path.basename(entryName);
+    await copyZipEntryToFile(zip, entryName, path.join(platesDirectory, previewFileName));
+    manifestPlatePreviews.push({
+      instanceId,
+      fileName: previewFileName,
+      source: buildImportedPictureSource(filePath, entryName)
+    });
+  }
+
+  metadata.instances = asArray(metadata.instances);
+  metadata.instances.push(instance);
+  metadata.model = metadata.model && typeof metadata.model === "object" ? metadata.model : {};
+  metadata.model.updatedAt = importedAt;
+  manifest.assets = manifest.assets && typeof manifest.assets === "object" ? manifest.assets : {};
+  manifest.assets.modelFiles = asArray(manifest.assets.modelFiles);
+  manifest.assets.plates = asArray(manifest.assets.plates);
+  manifest.assets.platePreviews = asArray(manifest.assets.platePreviews);
+  manifest.assets.modelFiles.push({
+    instanceId,
+    type: "3mf",
+    fileName: path.basename(filePath),
+    source: pathToFileURL(filePath).href,
+    customized: true,
+    sha1: fileHash
+  });
+  manifest.assets.plates.push(...manifestPlates);
+  manifest.assets.platePreviews.push(...manifestPlatePreviews);
+  manifest.savedAt = importedAt;
+
+  return { skipped: false, filePath, instanceId, title: instanceTitle };
+}
+
+async function importCustomized3mfFiles(projectPath, filePaths) {
+  const metadataPath = path.join(projectPath, "metadata.json");
+  const manifestPath = path.join(projectPath, "save-manifest.json");
+  const metadata = await readJsonFile(metadataPath);
+  const manifest = (await exists(manifestPath))
+    ? await readJsonFile(manifestPath)
+    : { savedAt: "", folderName: path.basename(projectPath), assets: {} };
+  const imported = [];
+  const skipped = [];
+  const failed = [];
+
+  for (const filePath of filePaths) {
+    try {
+      const result = await importCustomized3mfFile(projectPath, filePath, metadata, manifest);
+      (result.skipped ? skipped : imported).push(result);
+    } catch (error) {
+      failed.push({
+        filePath,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  if (imported.length > 0) {
+    await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2), "utf8");
+    await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+  }
+
+  return { imported, skipped, failed };
+}
+
 async function openContainingFolder(targetPath) {
   if (!targetPath) {
     return { ok: false, error: "缺少路径。" };
@@ -1662,7 +2041,7 @@ async function removeDirectorySafely(targetPath) {
   }
 }
 
-ipcMain.handle("window:open-project", async (_event, rootPath, projectPath, projectTitle) => {
+ipcMain.handle("window:open-project", async (_event, rootPath, projectPath, projectTitle, projectSnapshot) => {
   if (!rootPath || !projectPath) {
     return { ok: false, error: "缺少项目窗口参数。" };
   }
@@ -1677,10 +2056,32 @@ ipcMain.handle("window:open-project", async (_event, rootPath, projectPath, proj
       return { ok: false, error: "项目目录不存在。" };
     }
 
-    return createProjectWindow(resolvedRootPath, resolvedProjectPath, projectTitle);
+    return createProjectWindow(
+      resolvedRootPath,
+      resolvedProjectPath,
+      projectTitle,
+      projectSnapshot && typeof projectSnapshot === "object" ? projectSnapshot : null
+    );
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
+});
+
+ipcMain.handle("window:get-project-snapshot", async (_event, rootPath, projectPath) => {
+  if (!rootPath || !projectPath) {
+    return { ok: false, error: "缺少项目快照参数。" };
+  }
+
+  const resolvedRootPath = path.resolve(rootPath);
+  const resolvedProjectPath = path.resolve(projectPath);
+  if (!isPathInside(resolvedRootPath, resolvedProjectPath)) {
+    return { ok: false, error: "项目不在当前根目录中。" };
+  }
+
+  return {
+    ok: true,
+    project: projectWindowSnapshots.get(resolvedProjectPath) || null
+  };
 });
 
 ipcMain.handle("queue:read", async () => {
@@ -1743,17 +2144,35 @@ ipcMain.handle("instance:show-context-menu", async (event, targetPath) => {
     return { ok: false, error: "无法打开菜单。" };
   }
 
-  const menu = Menu.buildFromTemplate([
-    {
-      label: "打开所在文件夹",
-      click: () => {
-        void openContainingFolder(targetPath);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) {
+        return;
       }
-    }
-  ]);
+      settled = true;
+      resolve(result);
+    };
+    const menu = Menu.buildFromTemplate([
+      {
+        label: "修改名称",
+        click: () => finish({ ok: true, action: "rename" })
+      },
+      { type: "separator" },
+      {
+        label: "打开所在文件夹",
+        click: () => {
+          void openContainingFolder(targetPath);
+          finish({ ok: true, action: "open-folder" });
+        }
+      }
+    ]);
 
-  menu.popup({ window: win });
-  return { ok: true };
+    menu.on("menu-will-close", () => {
+      setTimeout(() => finish({ ok: true, canceled: true }), 0);
+    });
+    menu.popup({ window: win });
+  });
 });
 
 ipcMain.handle("library:scan-root", async (_event, rootPath) => {
@@ -1763,6 +2182,21 @@ ipcMain.handle("library:scan-root", async (_event, rootPath) => {
 
   try {
     return { ok: true, data: await scanRootDirectory(rootPath) };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+});
+
+ipcMain.handle("library:reconcile-root", async (_event, rootPath) => {
+  if (!rootPath) {
+    return { ok: false, error: "缺少根目录。" };
+  }
+
+  try {
+    return { ok: true, ...(await reconcileRootDirectory(rootPath)) };
   } catch (error) {
     return {
       ok: false,
@@ -1884,6 +2318,91 @@ ipcMain.handle("library:update-project-tags", async (_event, rootPath, projectPa
   }
 });
 
+ipcMain.handle(
+  "library:update-instance-favorite",
+  async (_event, rootPath, projectPath, instanceId, isFavorite) => {
+    try {
+      if (!rootPath || !projectPath || !instanceId || !isPathInside(rootPath, projectPath)) {
+        return { ok: false, error: "缺少有效的项目或打印配置参数。" };
+      }
+
+      const metadataPath = path.join(projectPath, "metadata.json");
+      if (!(await exists(metadataPath))) {
+        return { ok: false, error: "项目缺少 metadata.json。" };
+      }
+
+      const metadata = await readJsonFile(metadataPath);
+      const instances = asArray(metadata?.instances);
+      const targetInstance = instances.find((instance) => String(instance?.id) === String(instanceId));
+      if (!targetInstance) {
+        return { ok: false, error: "没有找到对应的打印配置。" };
+      }
+
+      targetInstance.isFavorite = Boolean(isFavorite);
+      metadata.instances = instances;
+      await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2), "utf8");
+
+      const repo = resolveProjectRepo(rootPath, projectPath);
+      return {
+        ok: true,
+        project: repo ? await readProject(projectPath, repo) : null,
+        instanceId: String(instanceId),
+        isFavorite: targetInstance.isFavorite
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+);
+
+ipcMain.handle(
+  "library:update-instance-alias",
+  async (_event, rootPath, projectPath, instanceId, alias) => {
+    try {
+      const nextAlias = String(alias || "").trim();
+      if (!rootPath || !projectPath || !instanceId || !isPathInside(rootPath, projectPath)) {
+        return { ok: false, error: "缺少有效的项目或打印配置参数。" };
+      }
+
+      const metadataPath = path.join(projectPath, "metadata.json");
+      if (!(await exists(metadataPath))) {
+        return { ok: false, error: "项目缺少 metadata.json。" };
+      }
+
+      const metadata = await readJsonFile(metadataPath);
+      const instances = asArray(metadata?.instances);
+      const targetInstance = instances.find((instance) => String(instance?.id) === String(instanceId));
+      if (!targetInstance) {
+        return { ok: false, error: "没有找到对应的打印配置。" };
+      }
+
+      if (nextAlias) {
+        targetInstance.alias = nextAlias;
+      } else {
+        delete targetInstance.alias;
+      }
+      metadata.instances = instances;
+      await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2), "utf8");
+
+      const repo = resolveProjectRepo(rootPath, projectPath);
+      return {
+        ok: true,
+        project: repo ? await readProject(projectPath, repo) : null,
+        instanceId: String(instanceId),
+        alias: nextAlias
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+);
+
 ipcMain.handle("library:import-3mf", async (_event, rootPath, targetDirectory) => {
   if (!rootPath || !targetDirectory) {
     return { ok: false, error: "缺少导入参数。" };
@@ -1919,6 +2438,45 @@ ipcMain.handle("library:import-3mf", async (_event, rootPath, targetDirectory) =
       imported: result.imported,
       failed: result.failed,
       targetDirectory
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+});
+
+ipcMain.handle("library:import-customized-3mf", async (_event, rootPath, projectPath) => {
+  if (!rootPath || !projectPath) {
+    return { ok: false, error: "缺少项目或根目录参数。" };
+  }
+
+  if (!isPathInside(rootPath, projectPath) || !(await exists(path.join(projectPath, "metadata.json")))) {
+    return { ok: false, error: "当前项目无效或不在资源库中。" };
+  }
+
+  const fileDialogResult = await dialog.showOpenDialog({
+    title: "选择要导入当前项目的 3MF 文件",
+    properties: ["openFile", "multiSelections"],
+    filters: [
+      {
+        name: "3MF 文件",
+        extensions: ["3mf"]
+      }
+    ]
+  });
+
+  if (fileDialogResult.canceled || fileDialogResult.filePaths.length === 0) {
+    return { ok: false, canceled: true };
+  }
+
+  try {
+    const result = await importCustomized3mfFiles(projectPath, fileDialogResult.filePaths);
+    return {
+      ok: result.imported.length > 0 || result.skipped.length > 0,
+      canceled: false,
+      ...result
     };
   } catch (error) {
     return {

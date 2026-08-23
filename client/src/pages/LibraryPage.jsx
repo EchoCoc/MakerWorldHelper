@@ -93,6 +93,27 @@ const TAG_SWATCHES = [
   { bg: "rgba(0, 140, 140, 0.14)", text: "#006d6d" }
 ];
 
+const QUEUE_BOARD_STAGES = [
+  { id: "pending", label: "待打印", note: "等待安排打印", tone: "sand" },
+  { id: "printing", label: "打印中", note: "正在打印处理", tone: "blue" },
+  { id: "assembly", label: "拼装中", note: "等待拼装完成", tone: "green" },
+  { id: "completed", label: "已完成", note: "已经完成归档", tone: "orange" }
+];
+
+function formatQueueDate(value) {
+  const date = value ? new Date(value) : null;
+  if (!date || Number.isNaN(date.getTime())) {
+    return "刚刚加入";
+  }
+
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(date);
+}
+
 function getTagColor(tag) {
   const source = String(tag || "");
   let hash = 0;
@@ -304,6 +325,116 @@ function ProjectCard({
   );
 }
 
+function QueueTaskCard({ project, stageIndex, onProjectChange, onQueueStageChange, onRemoveQueuedProject }) {
+  const previousStage = QUEUE_BOARD_STAGES[stageIndex - 1];
+  const nextStage = QUEUE_BOARD_STAGES[stageIndex + 1];
+
+  return (
+    <article className="queueTaskCard">
+      <button
+        className="queueTaskMain"
+        type="button"
+        onClick={() => onProjectChange(project.id)}
+        aria-label={`打开项目 ${project.title}`}
+      >
+        <img
+          className="queueTaskCover"
+          src={project.coverSrc || project.coverUrl}
+          alt=""
+          loading="lazy"
+          decoding="async"
+        />
+        <span className="queueTaskCopy">
+          <strong>{project.title}</strong>
+          <span>{project.author || "未知作者"}</span>
+          <small>加入于 {formatQueueDate(project.queueEntry?.markedAt)}</small>
+        </span>
+      </button>
+      <div className="queueTaskActions">
+        {previousStage ? (
+          <button
+            type="button"
+            className="queueMoveButton secondary"
+            onClick={() => onQueueStageChange(project, previousStage.id)}
+            title={`退回${previousStage.label}`}
+          >
+            ← {previousStage.label}
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="queueMoveButton quiet"
+            onClick={() => onRemoveQueuedProject(project)}
+          >
+            移出
+          </button>
+        )}
+        {nextStage ? (
+          <button
+            type="button"
+            className="queueMoveButton primary"
+            onClick={() => onQueueStageChange(project, nextStage.id)}
+          >
+            {nextStage.label} →
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="queueMoveButton quiet"
+            onClick={() => onRemoveQueuedProject(project)}
+          >
+            移出队列
+          </button>
+        )}
+      </div>
+    </article>
+  );
+}
+
+function QueueBoard({ projects, onProjectChange, onQueueStageChange, onRemoveQueuedProject }) {
+  return (
+    <div className="queueBoard">
+      {QUEUE_BOARD_STAGES.map((stage, stageIndex) => {
+        const stageProjects = projects
+          .filter((project) => project.queueStage === stage.id)
+          .sort((left, right) => {
+            const leftTime = Date.parse(left.queueEntry?.updatedAt || left.queueEntry?.markedAt || "") || 0;
+            const rightTime = Date.parse(right.queueEntry?.updatedAt || right.queueEntry?.markedAt || "") || 0;
+            return stage.id === "completed" ? rightTime - leftTime : leftTime - rightTime;
+          });
+
+        return (
+          <section className={`queueColumn ${stage.tone}`} key={stage.id}>
+            <header className="queueColumnHeader">
+              <div>
+                <h3>{stage.label}</h3>
+                <p>{stage.note}</p>
+              </div>
+              <span>{stageProjects.length}</span>
+            </header>
+            <div className="queueColumnList">
+              {stageProjects.length ? (
+                stageProjects.map((project) => (
+                  <QueueTaskCard
+                    key={project.id}
+                    project={project}
+                    stageIndex={stageIndex}
+                    onProjectChange={onProjectChange}
+                    onQueueStageChange={onQueueStageChange}
+                    onRemoveQueuedProject={onRemoveQueuedProject}
+                  />
+                ))
+              ) : (
+                <div className="queueColumnEmpty">暂无项目</div>
+              )}
+            </div>
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
 function ProjectListView({
   projects,
   totalProjectCount,
@@ -317,6 +448,7 @@ function ProjectListView({
   onMoveProject,
   onEditProjectTags,
   onQueueProject,
+  onQueueStageChange,
   onMarkPrintCompleted,
   onMarkPrintIncomplete,
   onRemoveQueuedProject,
@@ -327,12 +459,13 @@ function ProjectListView({
   onSortChange
 }) {
   const visiblePageItems = getVisiblePageItems(currentPage, totalPages);
+  const isQueueView = selectedRepoId === "queue";
 
   return (
     <section className="panel libraryPanel">
       <div className="panelHeader">
         <div>
-          <h2>项目</h2>
+          <h2>{isQueueView ? "打印队列" : "项目"}</h2>
           <p className="panelSubtle">
             {selectedRepoId === "all"
               ? "当前显示全部项目"
@@ -341,7 +474,7 @@ function ProjectListView({
                 : "当前显示选中仓库中的项目"}
           </p>
         </div>
-        <div className="panelHeaderActions">
+        {!isQueueView ? <div className="panelHeaderActions">
           <label className="sortControl">
             <span>排序</span>
             <select value={sortKey} onChange={(event) => onSortChange(event.target.value)}>
@@ -358,10 +491,21 @@ function ProjectListView({
           <span className="panelHint">
             {totalProjectCount} 个结果 · 第 {currentPage} / {totalPages} 页
           </span>
-        </div>
+        </div> : <span className="panelHint">{queueProjectCount} 个项目 · 4 个阶段</span>}
       </div>
 
-      <div className="projectGrid compactGrid">
+      {isQueueView ? (
+        projects.length ? (
+          <QueueBoard
+            projects={projects}
+            onProjectChange={onProjectChange}
+            onQueueStageChange={onQueueStageChange}
+            onRemoveQueuedProject={onRemoveQueuedProject}
+          />
+        ) : (
+          <div className="emptyState">打印队列还是空的，先把项目标记进来吧。</div>
+        )
+      ) : <div className="projectGrid compactGrid">
         {projects.length > 0 ? (
           projects.map((project) => (
             <ProjectCard
@@ -385,9 +529,9 @@ function ProjectListView({
             {selectedRepoId === "queue" ? "打印队列还是空的，先把项目标记进来吧。" : "当前没有可展示的项目。"}
           </div>
         )}
-      </div>
+      </div>}
 
-      {totalPages > 1 ? (
+      {!isQueueView && totalPages > 1 ? (
         <div className="paginationBar">
           <div className="paginationSummary" aria-live="polite">
             <strong>第 {currentPage} 页</strong>
@@ -685,6 +829,9 @@ function ProjectDetailView({
   onMarkPrintIncomplete,
   onRemoveQueuedProject,
   onRefreshProject,
+  onImportCustomized3mf,
+  onToggleInstanceFavorite,
+  onRenameInstance,
   onDeleteProject
 }) {
   const detailPictures = selectedProject.pictureItems || [];
@@ -787,6 +934,13 @@ function ProjectDetailView({
   const activeDetailPicture = detailPictures[detailPictureIndex] || null;
   const documentItems = selectedProject.documentItems || [];
   const materialSections = selectedProject.materialSections || [];
+  const instanceItems = (selectedProject.instanceItems || [])
+    .map((instance, originalIndex) => ({ instance, originalIndex }))
+    .sort((left, right) =>
+      Number(right.instance.isFavorite) - Number(left.instance.isFavorite) ||
+      left.originalIndex - right.originalIndex
+    )
+    .map(({ instance }) => instance);
   const customization = selectedProject.customization || null;
   const customizationOptions = Array.isArray(customization?.options)
     ? customization.options
@@ -839,6 +993,18 @@ function ProjectDetailView({
               >
                 刷新项目
               </button>
+              {hasCustomization ? (
+                <button
+                  className="detailMenuItem"
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onImportCustomized3mf(selectedProject);
+                  }}
+                >
+                  导入配置
+                </button>
+              ) : null}
               <button
                 className="detailMenuItem"
                 type="button"
@@ -1018,18 +1184,21 @@ function ProjectDetailView({
         <div className="detailSide">
           <div className="instancePanel">
             <div className="panelHeader">
-              <h3>打印配置 <span className="panelCount">{selectedProject.instanceItems?.length || 0}</span></h3>
+              <h3>打印配置 <span className="panelCount">{instanceItems.length}</span></h3>
             </div>
             <div className="instanceList">
-              {(selectedProject.instanceItems || []).map((instance) => (
+              {instanceItems.map((instance) => (
                 <article
                   key={instance.id}
                   className="instanceCard"
-                  onContextMenu={(event) => {
+                  onContextMenu={async (event) => {
                     event.preventDefault();
                     const targetPath = instance.filesDirectoryPath || instance.modelFiles?.[0]?.path;
                     if (targetPath) {
-                      window.desktopAPI?.showInstanceContextMenu?.(targetPath);
+                      const result = await window.desktopAPI?.showInstanceContextMenu?.(targetPath);
+                      if (result?.action === "rename") {
+                        onRenameInstance(selectedProject, instance);
+                      }
                     }
                   }}
                 >
@@ -1063,7 +1232,10 @@ function ProjectDetailView({
                               <div className="instancePreviewCreator">{instance.creator.name}</div>
                             ) : null}
                           </div>
-                          {instance.isDesigner ? <span className="designerBadge">设计师</span> : null}
+                          <div className="instancePreviewBadges">
+                            {instance.isImported ? <span className="importedBadge">导入</span> : null}
+                            {instance.isDesigner ? <span className="designerBadge">设计师</span> : null}
+                          </div>
                         </div>
                         {instance.summaryText ? (
                           <div className="instancePreviewDescription">
@@ -1120,6 +1292,7 @@ function ProjectDetailView({
                       <div className="instanceInfo">
                         <div className="instanceTitle">{instance.title}</div>
                         <div className="instanceQuickFacts">
+                          {instance.isImported ? <span className="importedBadge">导入</span> : null}
                           {instance.isDesigner ? <span className="designerBadge">设计师</span> : null}
                           <span title="打印时间">
                             <svg viewBox="0 0 20 20" aria-hidden="true">
@@ -1144,7 +1317,21 @@ function ProjectDetailView({
                           </span>
                         </div>
                       </div>
-                      <InstanceFileAction files={instance.modelFiles} onOpenPath={onOpenPath} />
+                      <div className="instanceToplineActions">
+                        <button
+                          className={`instanceFavoriteButton ${instance.isFavorite ? "active" : ""}`}
+                          type="button"
+                          aria-label={instance.isFavorite ? `取消收藏 ${instance.title}` : `收藏 ${instance.title}`}
+                          aria-pressed={instance.isFavorite}
+                          title={instance.isFavorite ? "取消收藏" : "收藏并置顶"}
+                          onClick={() => onToggleInstanceFavorite(selectedProject, instance)}
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9L12 3Z" />
+                          </svg>
+                        </button>
+                        <InstanceFileAction files={instance.modelFiles} onOpenPath={onOpenPath} />
+                      </div>
                     </div>
                   </div>
                 </article>
@@ -1163,6 +1350,13 @@ function ProjectDetailView({
                 <span className="panelCount">{customization.count}</span>
               ) : null}
             </h3>
+            <button
+              className="secondaryButton customizationImportButton"
+              type="button"
+              onClick={() => onImportCustomized3mf(selectedProject)}
+            >
+              导入配置
+            </button>
           </div>
           <div className="customizationOptionList">
             {visibleCustomizationOptions.map((option, index) => {
@@ -1298,10 +1492,14 @@ export function LibraryPage({
   onMoveProject,
   onEditProjectTags,
   onQueueProject,
+  onQueueStageChange,
   onMarkPrintCompleted,
   onMarkPrintIncomplete,
   onRemoveQueuedProject,
   onRefreshProject,
+  onImportCustomized3mf,
+  onToggleInstanceFavorite,
+  onRenameInstance,
   onDeleteProject
 }) {
   const isDetailMode = Boolean(selectedProject);
@@ -1319,6 +1517,9 @@ export function LibraryPage({
       onMarkPrintIncomplete={onMarkPrintIncomplete}
       onRemoveQueuedProject={onRemoveQueuedProject}
       onRefreshProject={onRefreshProject}
+      onImportCustomized3mf={onImportCustomized3mf}
+      onToggleInstanceFavorite={onToggleInstanceFavorite}
+      onRenameInstance={onRenameInstance}
       onDeleteProject={onDeleteProject}
     />
   ) : null;
@@ -1449,6 +1650,7 @@ export function LibraryPage({
               onMoveProject={onMoveProject}
               onEditProjectTags={onEditProjectTags}
               onQueueProject={onQueueProject}
+              onQueueStageChange={onQueueStageChange}
               onMarkPrintCompleted={onMarkPrintCompleted}
               onMarkPrintIncomplete={onMarkPrintIncomplete}
               onRemoveQueuedProject={onRemoveQueuedProject}

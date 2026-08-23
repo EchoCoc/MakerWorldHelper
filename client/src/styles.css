@@ -1187,6 +1187,62 @@ h1 {
   min-width: 0;
 }
 
+.instanceToplineActions {
+  display: inline-flex;
+  flex: none;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.instanceFavoriteButton {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  flex: none;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 253, 248, 0.92);
+  color: #a39382;
+  cursor: pointer;
+  transition:
+    transform 0.16s ease,
+    border-color 0.16s ease,
+    background-color 0.16s ease,
+    color 0.16s ease;
+}
+
+.instanceFavoriteButton svg {
+  width: 18px;
+  height: 18px;
+  fill: transparent;
+  stroke: currentColor;
+  stroke-linejoin: round;
+  stroke-width: 1.7;
+}
+
+.instanceFavoriteButton:hover {
+  transform: translateY(-1px);
+  border-color: rgba(190, 126, 0, 0.3);
+  color: #b87800;
+}
+
+.instanceFavoriteButton.active {
+  border-color: rgba(190, 126, 0, 0.24);
+  background: rgba(255, 190, 31, 0.13);
+  color: #d08a00;
+}
+
+.instanceFavoriteButton.active svg {
+  fill: currentColor;
+}
+
+.instanceFavoriteButton:focus-visible {
+  outline: 2px solid rgba(190, 126, 0, 0.45);
+  outline-offset: 2px;
+}
+
 .miniChip {
   display: inline-flex;
   align-items: center;
@@ -1208,6 +1264,11 @@ h1 {
   font-weight: 700;
 }
 
+.queueStageBadge.pending {
+  background: rgba(136, 104, 66, 0.12);
+  color: #75552f;
+}
+
 .queueStageBadge.printing {
   background: rgba(24, 119, 242, 0.12);
   color: #185abc;
@@ -1216,6 +1277,190 @@ h1 {
 .queueStageBadge.assembly {
   background: rgba(46, 160, 67, 0.14);
   color: #216e39;
+}
+
+.queueStageBadge.completed {
+  background: rgba(182, 81, 0, 0.12);
+  color: #8e3d00;
+}
+
+.queueBoard {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(220px, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.queueColumn {
+  --queue-tone: #8a6c48;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgba(95, 65, 35, 0.12);
+  border-top: 3px solid var(--queue-tone);
+  border-radius: 16px;
+  background: rgba(249, 245, 238, 0.78);
+}
+
+.queueColumn.blue {
+  --queue-tone: #2874c6;
+  background: rgba(239, 246, 253, 0.78);
+}
+
+.queueColumn.green {
+  --queue-tone: #348657;
+  background: rgba(239, 248, 242, 0.78);
+}
+
+.queueColumn.orange {
+  --queue-tone: #b65100;
+  background: rgba(255, 245, 234, 0.82);
+}
+
+.queueColumnHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 2px 2px 12px;
+}
+
+.queueColumnHeader h3,
+.queueColumnHeader p {
+  margin: 0;
+}
+
+.queueColumnHeader h3 {
+  font-size: 16px;
+}
+
+.queueColumnHeader p {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.queueColumnHeader > span {
+  display: grid;
+  min-width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--queue-tone) 12%, white);
+  color: var(--queue-tone);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.queueColumnList {
+  display: grid;
+  gap: 10px;
+}
+
+.queueTaskCard {
+  overflow: hidden;
+  border: 1px solid rgba(95, 65, 35, 0.12);
+  border-radius: 13px;
+  background: rgba(255, 253, 249, 0.96);
+  box-shadow: 0 6px 18px rgba(69, 43, 17, 0.06);
+}
+
+.queueTaskMain {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 10px;
+  padding: 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.queueTaskMain:hover {
+  background: rgba(182, 81, 0, 0.035);
+}
+
+.queueTaskCover {
+  width: 58px;
+  height: 58px;
+  border-radius: 10px;
+  object-fit: cover;
+  background: #eee7dc;
+}
+
+.queueTaskCopy {
+  min-width: 0;
+  display: grid;
+  align-content: center;
+  gap: 3px;
+}
+
+.queueTaskCopy strong,
+.queueTaskCopy span,
+.queueTaskCopy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queueTaskCopy strong {
+  font-size: 13px;
+}
+
+.queueTaskCopy span,
+.queueTaskCopy small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.queueTaskActions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding: 0 10px 10px;
+}
+
+.queueMoveButton {
+  min-height: 30px;
+  padding: 5px 7px;
+  border: 1px solid rgba(95, 65, 35, 0.12);
+  border-radius: 9px;
+  background: #fff;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.queueMoveButton.primary {
+  border-color: color-mix(in srgb, var(--queue-tone) 22%, transparent);
+  background: color-mix(in srgb, var(--queue-tone) 9%, white);
+  color: var(--queue-tone);
+}
+
+.queueMoveButton:hover {
+  border-color: color-mix(in srgb, var(--queue-tone) 35%, transparent);
+}
+
+.queueMoveButton.quiet {
+  color: #8b7763;
+}
+
+.queueColumnEmpty {
+  padding: 24px 10px;
+  border: 1px dashed rgba(95, 65, 35, 0.16);
+  border-radius: 11px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.customizationImportButton {
+  min-height: 36px;
+  padding: 7px 12px;
+  white-space: nowrap;
 }
 
 .projectStatusBadges {
@@ -1307,6 +1552,26 @@ h1 {
   font-weight: 800;
 }
 
+.importedBadge {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 8px;
+  border-radius: 7px;
+  background: rgba(182, 81, 0, 0.12);
+  color: #9a4708;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.instancePreviewBadges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
 .inlineDesignerBadge {
   width: fit-content;
   margin-top: 5px;
@@ -1320,7 +1585,7 @@ h1 {
   margin-top: 7px;
 }
 
-.instanceQuickFacts > span:not(.designerBadge) {
+.instanceQuickFacts > span:not(.designerBadge):not(.importedBadge) {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -1939,5 +2204,15 @@ h1 {
 
   .searchBar {
     width: 100%;
+  }
+
+  .queueBoard {
+    grid-template-columns: repeat(2, minmax(240px, 1fr));
+  }
+}
+
+@media (max-width: 700px) {
+  .queueBoard {
+    grid-template-columns: 1fr;
   }
 }

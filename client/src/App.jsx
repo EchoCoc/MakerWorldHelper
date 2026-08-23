@@ -12,9 +12,14 @@ const IS_PROJECT_DETAIL_WINDOW = APP_WINDOW_PARAMS.get("window") === "project";
 const PROJECT_DETAIL_ROOT_PATH = APP_WINDOW_PARAMS.get("rootPath") || "";
 const PROJECT_DETAIL_PROJECT_PATH = APP_WINDOW_PARAMS.get("projectPath") || "";
 const QUEUE_STAGE_OPTIONS = [
+  { id: "pending", label: "待打印" },
   { id: "printing", label: "打印中" },
-  { id: "assembly", label: "拼装中" }
+  { id: "assembly", label: "拼装中" },
+  { id: "completed", label: "已完成" }
 ];
+const QUEUE_STAGE_LABELS = Object.fromEntries(
+  QUEUE_STAGE_OPTIONS.map((option) => [option.id, option.label])
+);
 
 function normalizeSortText(value) {
   return String(value || "").trim().toLocaleLowerCase("zh-CN");
@@ -106,8 +111,8 @@ function mergeQueueEntries(...entryGroups) {
 
   for (const entries of entryGroups) {
     for (const [key, entry] of Object.entries(entries || {})) {
-      const existingTime = Date.parse(merged[key]?.markedAt || "") || 0;
-      const candidateTime = Date.parse(entry?.markedAt || "") || 0;
+      const existingTime = Date.parse(merged[key]?.updatedAt || merged[key]?.markedAt || "") || 0;
+      const candidateTime = Date.parse(entry?.updatedAt || entry?.markedAt || "") || 0;
       if (!merged[key] || candidateTime >= existingTime) {
         merged[key] = entry;
       }
@@ -126,7 +131,7 @@ function getProjectQueueKey(project) {
 }
 
 function normalizeQueueStage(stage) {
-  return stage === "assembly" ? "assembly" : "printing";
+  return QUEUE_STAGE_LABELS[stage] ? stage : "pending";
 }
 
 function normalizeQueueEntry(entry) {
@@ -134,18 +139,52 @@ function normalizeQueueEntry(entry) {
     return null;
   }
 
-  const stage = normalizeQueueStage(entry.stage);
+  const isLegacyEntry = Number(entry.schemaVersion || 0) < 2;
+  let stage = normalizeQueueStage(entry.stage);
+
+  if (isLegacyEntry) {
+    if (entry.stage === "assembly") {
+      stage = "assembly";
+    } else if (entry.printCompleted === true) {
+      stage = "completed";
+    } else {
+      stage = "pending";
+    }
+  }
+
+  const fallbackTime = new Date().toISOString();
+  const markedAt =
+    typeof entry.markedAt === "string" && entry.markedAt.trim() ? entry.markedAt : fallbackTime;
+  const updatedAt =
+    typeof entry.updatedAt === "string" && entry.updatedAt.trim() ? entry.updatedAt : markedAt;
 
   return {
+    schemaVersion: 2,
     stage,
-    printCompleted: stage === "assembly" || entry.printCompleted === true,
-    markedAt:
-      typeof entry.markedAt === "string" && entry.markedAt.trim() ? entry.markedAt : new Date().toISOString()
+    printCompleted: stage === "assembly" || stage === "completed",
+    markedAt,
+    updatedAt,
+    ...(stage === "completed"
+      ? { completedAt: entry.completedAt || updatedAt }
+      : {})
   };
 }
 
 function getQueueStageLabel(stage) {
-  return normalizeQueueStage(stage) === "assembly" ? "拼装中" : "打印中";
+  return QUEUE_STAGE_LABELS[normalizeQueueStage(stage)];
+}
+
+function normalizeQueueEntries(entries) {
+  const normalizedEntries = {};
+
+  for (const [queueKey, entry] of Object.entries(entries || {})) {
+    const normalizedEntry = normalizeQueueEntry(entry);
+    if (normalizedEntry) {
+      normalizedEntries[queueKey] = normalizedEntry;
+    }
+  }
+
+  return normalizedEntries;
 }
 
 function parseTagInput(value) {
@@ -382,7 +421,9 @@ export default function App() {
   const [searchText, setSearchText] = useState("");
   const [sortKey, setSortKey] = useState(DEFAULT_SORT_KEY);
   const [currentPage, setCurrentPage] = useState(1);
-  const [queueEntries, setQueueEntries] = useState(() => readCachedQueueEntries());
+  const [queueEntries, setQueueEntries] = useState(() =>
+    normalizeQueueEntries(readCachedQueueEntries())
+  );
   const [status, setStatus] = useState(() =>
     hasDesktopApi
       ? IS_PROJECT_DETAIL_WINDOW
@@ -415,7 +456,9 @@ export default function App() {
       }
 
       setQueueEntries((currentEntries) => {
-        const mergedEntries = mergeQueueEntries(result.entries, currentEntries);
+        const mergedEntries = normalizeQueueEntries(
+          mergeQueueEntries(result.entries, currentEntries)
+        );
         writeCachedQueueEntries(mergedEntries);
         void window.desktopAPI?.writePrintQueue?.(mergedEntries);
         return mergedEntries;
@@ -438,7 +481,7 @@ export default function App() {
           queueEntry,
           queueStage: queueEntry?.stage || null,
           queueStageLabel: queueEntry ? getQueueStageLabel(queueEntry.stage) : "",
-          printCompleted: queueEntry?.printCompleted === true
+          printCompleted: queueEntry?.stage === "completed"
         };
       }),
     [allProjects, queueEntries]
@@ -519,7 +562,7 @@ export default function App() {
   useEffect(() => {
     function handleStorage(event) {
       if (event.key === PRINT_QUEUE_STORAGE_KEY) {
-        setQueueEntries(readCachedQueueEntries());
+        setQueueEntries(normalizeQueueEntries(readCachedQueueEntries()));
       }
     }
 
@@ -621,7 +664,10 @@ export default function App() {
         if (
           normalizedEntry.stage !== entry?.stage ||
           normalizedEntry.printCompleted !== (entry?.printCompleted === true) ||
-          normalizedEntry.markedAt !== entry?.markedAt
+          normalizedEntry.markedAt !== entry?.markedAt ||
+          normalizedEntry.updatedAt !== entry?.updatedAt ||
+          normalizedEntry.schemaVersion !== entry?.schemaVersion ||
+          normalizedEntry.completedAt !== entry?.completedAt
         ) {
           changed = true;
         }
@@ -644,12 +690,22 @@ export default function App() {
     }
 
     let cancelled = false;
+    let refreshTimer = null;
+
+    const applyDetailProject = (project, nextStatus) => {
+      setRepositories([]);
+      setAllProjects([project]);
+      setSelectedRepoId(project.repoId || "all");
+      setSelectedProjectId(project.id);
+      setCurrentPage(1);
+      setStatus(nextStatus);
+    };
 
     setRootPath(PROJECT_DETAIL_ROOT_PATH);
-    setStatus("正在读取项目详情…");
+    setStatus("正在打开项目详情…");
 
     (async () => {
-      const result = await window.desktopAPI?.refreshProject?.(
+      const snapshotResult = await window.desktopAPI?.getProjectSnapshot?.(
         PROJECT_DETAIL_ROOT_PATH,
         PROJECT_DETAIL_PROJECT_PATH
       );
@@ -657,27 +713,61 @@ export default function App() {
         return;
       }
 
-      if (!result?.ok) {
-        setStatus(result?.error || "项目详情加载失败。");
-        return;
+      if (snapshotResult?.ok && snapshotResult.project) {
+        applyDetailProject(snapshotResult.project, "已从缓存打开，正在后台校验…");
+      } else {
+        setStatus("正在读取项目详情…");
       }
 
-      if (!result.project) {
-        setStatus("项目已被移动或删除，无法打开项目详情。");
-        return;
-      }
+      refreshTimer = setTimeout(async () => {
+        const result = await window.desktopAPI?.refreshProject?.(
+          PROJECT_DETAIL_ROOT_PATH,
+          PROJECT_DETAIL_PROJECT_PATH
+        );
+        if (cancelled) {
+          return;
+        }
 
-      setRepositories([]);
-      setAllProjects([result.project]);
-      setSelectedRepoId(result.project.repoId || "all");
-      setSelectedProjectId(result.project.id);
-      setCurrentPage(1);
-      setStatus("项目详情已加载。");
+        if (!result?.ok) {
+          if (!snapshotResult?.project) {
+            setStatus(result?.error || "项目详情加载失败。");
+          } else {
+            setStatus("已显示缓存内容，后台校验失败，可稍后手动刷新。");
+          }
+          return;
+        }
+
+        if (!result.project) {
+          setStatus("项目已被移动或删除，无法打开项目详情。");
+          return;
+        }
+
+        applyDetailProject(result.project, "项目详情已加载。");
+      }, snapshotResult?.project ? 180 : 0);
     })();
 
     return () => {
       cancelled = true;
+      if (refreshTimer) {
+        clearTimeout(refreshTimer);
+      }
     };
+  }, [hasDesktopApi]);
+
+  useEffect(() => {
+    if (!hasDesktopApi || !IS_PROJECT_DETAIL_WINDOW || !window.desktopAPI?.onProjectSnapshot) {
+      return undefined;
+    }
+
+    return window.desktopAPI.onProjectSnapshot((project) => {
+      if (!project || project.projectPath !== PROJECT_DETAIL_PROJECT_PATH) {
+        return;
+      }
+      setAllProjects([project]);
+      setSelectedRepoId(project.repoId || "all");
+      setSelectedProjectId(project.id);
+      setStatus("已更新项目缓存，正在后台校验…");
+    });
   }, [hasDesktopApi]);
 
   useEffect(() => {
@@ -710,12 +800,22 @@ export default function App() {
           setSelectedProjectId,
           setCurrentPage
         });
-        setStatus(`已从缓存恢复 ${cachedProjects.length} 个项目，正在后台刷新…`);
+        setStatus(`已从缓存恢复 ${cachedProjects.length} 个项目，正在后台检查变更…`);
       } else if (!cancelled) {
         setStatus("正在扫描本地项目…");
       }
 
-      const scanResult = await window.desktopAPI.scanRoot(cachedRootPath);
+      if (cacheResult?.ok && cacheResult?.data) {
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        if (cancelled) {
+          return;
+        }
+      }
+
+      const canReconcile = cacheResult?.ok && cacheResult?.data && window.desktopAPI.reconcileRoot;
+      const scanResult = canReconcile
+        ? await window.desktopAPI.reconcileRoot(cachedRootPath)
+        : await window.desktopAPI.scanRoot(cachedRootPath);
       if (cancelled) {
         return;
       }
@@ -746,7 +846,13 @@ export default function App() {
         setSelectedProjectId,
         setCurrentPage
       });
-      setStatus(`已自动恢复 ${nextProjects.length} 个项目。`);
+      setStatus(
+        scanResult.fullScan
+          ? `已自动恢复 ${nextProjects.length} 个项目。`
+          : scanResult.changedCount > 0
+            ? `增量检查完成，已更新 ${scanResult.changedCount} 个项目。`
+            : `已恢复 ${nextProjects.length} 个项目，没有检测到变更。`
+      );
     })();
 
     return () => {
@@ -816,13 +922,12 @@ export default function App() {
       return;
     }
 
-    const queueKey = getProjectQueueKey(project);
-    const currentEntry = normalizeQueueEntry(queueEntries[queueKey]);
+    const currentEntry = normalizeQueueEntry(queueEntries[getProjectQueueKey(project)]);
     const selectedStage = await requestChoiceDialog({
       title: currentEntry ? "更新队列状态" : "加入打印队列",
       message: `为 “${project.title}” 选择当前阶段。`,
       confirmLabel: currentEntry ? "更新状态" : "加入队列",
-      initialSelectedId: currentEntry?.stage || "printing",
+      initialSelectedId: currentEntry?.stage || "pending",
       options: QUEUE_STAGE_OPTIONS.map((option) => ({
         id: option.id,
         label: option.label
@@ -834,18 +939,34 @@ export default function App() {
       return;
     }
 
+    handleQueueStageChange(project, selectedStage);
+  }
+
+  function handleQueueStageChange(project, selectedStage) {
+    if (!project) {
+      return;
+    }
+
+    const queueKey = getProjectQueueKey(project);
+    const currentEntry = normalizeQueueEntry(queueEntries[queueKey]);
     const nextStage = normalizeQueueStage(selectedStage);
+    const now = new Date().toISOString();
     const nextEntry = {
+      schemaVersion: 2,
       stage: nextStage,
-      printCompleted: nextStage === "assembly",
-      markedAt: currentEntry?.markedAt || new Date().toISOString()
+      printCompleted: nextStage === "assembly" || nextStage === "completed",
+      markedAt: currentEntry?.markedAt || now,
+      updatedAt: now,
+      ...(nextStage === "completed"
+        ? { completedAt: currentEntry?.completedAt || now }
+        : {})
     };
 
     updateQueueEntries((currentEntries) => ({
       ...currentEntries,
       [queueKey]: nextEntry
     }));
-    setStatus(`项目 “${project.title}” 已标记为${getQueueStageLabel(nextEntry.stage)}。`);
+    setStatus(`项目 “${project.title}” 已移动到${getQueueStageLabel(nextEntry.stage)}。`);
   }
 
   function handleMarkPrintCompleted(project) {
@@ -855,18 +976,11 @@ export default function App() {
 
     const queueKey = getProjectQueueKey(project);
     const currentEntry = normalizeQueueEntry(queueEntries[queueKey]);
-    if (!currentEntry || currentEntry.printCompleted) {
+    if (!currentEntry || currentEntry.stage === "completed") {
       return;
     }
 
-    updateQueueEntries((currentEntries) => ({
-      ...currentEntries,
-      [queueKey]: {
-        ...currentEntry,
-        printCompleted: true
-      }
-    }));
-    setStatus(`项目 “${project.title}” 已标记为已打印完成。`);
+    handleQueueStageChange(project, currentEntry.stage === "assembly" ? "completed" : "assembly");
   }
 
   function handleMarkPrintIncomplete(project) {
@@ -876,21 +990,11 @@ export default function App() {
 
     const queueKey = getProjectQueueKey(project);
     const currentEntry = normalizeQueueEntry(queueEntries[queueKey]);
-    if (!currentEntry || !currentEntry.printCompleted) {
+    if (!currentEntry || currentEntry.stage === "pending") {
       return;
     }
 
-    const nextEntry = {
-      ...currentEntry,
-      stage: currentEntry.stage === "assembly" ? "printing" : currentEntry.stage,
-      printCompleted: false
-    };
-
-    updateQueueEntries((currentEntries) => ({
-      ...currentEntries,
-      [queueKey]: nextEntry
-    }));
-    setStatus(`项目 “${project.title}” 已标记为未打印完成。`);
+    handleQueueStageChange(project, "pending");
   }
 
   function handleRemoveQueuedProject(project) {
@@ -1048,6 +1152,120 @@ export default function App() {
     setStatus(`项目 “${result.project.title}” 已刷新。`);
   }
 
+  async function handleImportCustomized3mf(project) {
+    if (!rootPath || !project) {
+      setStatus("当前没有可导入配置的项目。");
+      return;
+    }
+
+    setStatus(`正在向 “${project.title}” 导入配置…`);
+    const result = await window.desktopAPI?.importCustomized3mf?.(rootPath, project.projectPath);
+
+    if (!result?.ok) {
+      setStatus(result?.canceled ? "已取消导入配置。" : result?.error || "导入配置失败。");
+      return;
+    }
+
+    await handleRefreshProject(project);
+    const importedCount = result.imported?.length || 0;
+    const skippedCount = result.skipped?.length || 0;
+    const failedCount = result.failed?.length || 0;
+    const details = [
+      importedCount ? `新增 ${importedCount} 个` : "",
+      skippedCount ? `跳过重复 ${skippedCount} 个` : "",
+      failedCount ? `失败 ${failedCount} 个` : ""
+    ].filter(Boolean);
+    setStatus(`项目 “${project.title}” 的导入配置已处理：${details.join("，")}。`);
+  }
+
+  async function handleToggleInstanceFavorite(project, instance) {
+    if (!rootPath || !project || !instance) {
+      setStatus("当前没有可收藏的打印配置。");
+      return;
+    }
+
+    const nextFavorite = !instance.isFavorite;
+    const result = await window.desktopAPI?.updateInstanceFavorite?.(
+      rootPath,
+      project.projectPath,
+      instance.id,
+      nextFavorite
+    );
+
+    if (!result?.ok || !result.project) {
+      setStatus(result?.error || "更新打印配置收藏状态失败。");
+      return;
+    }
+
+    let nextProjectsSnapshot = null;
+    setAllProjects((currentProjects) => {
+      nextProjectsSnapshot = upsertProject(currentProjects, project.projectPath, result.project);
+      return nextProjectsSnapshot;
+    });
+    setRepositories((currentRepositories) =>
+      syncRepositoryCounts(currentRepositories, nextProjectsSnapshot || allProjects)
+    );
+    setSelectedProjectId(result.project.id);
+    setStatus(
+      nextFavorite
+        ? `已收藏打印配置 “${instance.title}” 并置顶。`
+        : `已取消收藏打印配置 “${instance.title}”。`
+    );
+  }
+
+  async function handleRenameInstance(project, instance) {
+    if (!rootPath || !project || !instance) {
+      setStatus("当前没有可重命名的打印配置。");
+      return;
+    }
+
+    const nextTitle = await requestTextDialog({
+      title: "修改打印配置名称",
+      message: "输入配置别名。原始名称和文件目录不会改变；清空别名可恢复原始名称。",
+      initialValue: instance.alias || instance.title || "",
+      placeholder: "打印配置名称",
+      confirmLabel: "保存名称",
+      allowEmpty: true
+    });
+
+    if (nextTitle == null) {
+      setStatus("已取消修改打印配置名称。");
+      return;
+    }
+
+    const normalizedTitle = nextTitle.trim();
+    if (normalizedTitle === String(instance.alias || "").trim()) {
+      setStatus("打印配置名称没有变化。");
+      return;
+    }
+
+    const result = await window.desktopAPI?.updateInstanceAlias?.(
+      rootPath,
+      project.projectPath,
+      instance.id,
+      normalizedTitle
+    );
+    if (!result?.ok || !result.project) {
+      setStatus(result?.error || "修改打印配置名称失败。");
+      return;
+    }
+
+    let nextProjectsSnapshot = null;
+    setAllProjects((currentProjects) => {
+      nextProjectsSnapshot = upsertProject(currentProjects, project.projectPath, result.project);
+      return nextProjectsSnapshot;
+    });
+    setRepositories((currentRepositories) =>
+      syncRepositoryCounts(currentRepositories, nextProjectsSnapshot || allProjects)
+    );
+    setSelectedProjectId(result.project.id);
+    setStatus(
+      normalizedTitle
+        ? `打印配置别名已修改为 “${normalizedTitle}”。`
+        : `已清除打印配置别名，恢复显示原始名称 “${instance.originalTitle || instance.title}”。`
+    );
+  }
+
   async function handleEditProjectTags(project) {
     if (!rootPath || !project) {
       setStatus("当前没有可编辑标签的项目。");
@@ -1148,7 +1366,8 @@ export default function App() {
       const result = await window.desktopAPI.openProjectWindow(
         rootPath,
         project.projectPath,
-        project.title
+        project.title,
+        project
       );
       if (!result?.ok) {
         setStatus(result?.error || "打开项目详情窗口失败。");
@@ -1170,7 +1389,7 @@ export default function App() {
           element={
             <LibraryPage
               repositories={visibleRepositories}
-              projects={pageProjects}
+              projects={selectedRepoId === QUEUE_REPO_ID ? filteredProjects : pageProjects}
               totalProjectCount={filteredProjects.length}
               queueProjectCount={queueProjectCount}
               currentPage={currentPage}
@@ -1195,8 +1414,12 @@ export default function App() {
                 await refreshRoot(rootPath, selectedRepoId);
               }}
               onRefreshProject={handleRefreshProject}
+              onImportCustomized3mf={handleImportCustomized3mf}
+              onToggleInstanceFavorite={handleToggleInstanceFavorite}
+              onRenameInstance={handleRenameInstance}
               onEditProjectTags={handleEditProjectTags}
               onQueueProject={handleQueueProject}
+              onQueueStageChange={handleQueueStageChange}
               onMarkPrintCompleted={handleMarkPrintCompleted}
               onMarkPrintIncomplete={handleMarkPrintIncomplete}
               onRemoveQueuedProject={handleRemoveQueuedProject}
